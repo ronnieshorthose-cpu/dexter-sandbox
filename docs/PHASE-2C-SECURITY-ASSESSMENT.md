@@ -21,6 +21,10 @@
 > used for accounting). Where a section below disagrees with that one, the
 > remediation section is current.
 
+> **Update (Phase 2D, 2026-10-26):** the L-5 permission change stopped the
+> reviewer from commenting on pull requests. See [Phase 2D](#phase-2d-permission-to-comment-on-pull-requests)
+> at the end.
+
 ## How the assessment was done
 
 - Read every file in the reviewer, its tests and workflows, the Phase 2B report, and the PR #4 description.
@@ -313,7 +317,7 @@ they were run only in the **Tests** workflow on GitHub Actions.
 | L-2 | A failure posting the in-progress comment (or creating the client) after the reservation left a stuck `pending` status. | Guarded: ends FAILED with an error status and no call. | Fixed. `L2StartFailureTests`, updated `C7...test_reservation_comment_failure_means_no_call` |
 | L-3 | A failed final status write still exited 0. | `_status` reports failure; the run exits 1 and says the commit may still show the reservation. | Fixed. Updated `test_runner.FailureTests.test_result_status_write_failure_does_not_crash` |
 | L-4 | The boundary token was not in the trusted instructions. | `instructions_for(boundary)` names the token; boundary lines with other tokens are declared untrusted data. | Fixed. `L4BoundaryTokenTests` |
-| L-5 | `pull-requests: write` was broader than needed. | Jobs now have `contents: read`, `pull-requests: read`, `issues: write`, `statuses: write`. | Fixed in the workflow; **not yet verified on GitHub** that `issues: write` is enough to comment on a PR. The first dry run (README Activation step 5) checks it. "Allow GitHub Actions to create and approve pull requests" needs admin access to read and was not checked. `test_workflows.test_job_permissions_minimal` |
+| L-5 | `pull-requests: write` was broader than needed. | Jobs were changed to `contents: read`, `pull-requests: read`, `issues: write`, `statuses: write`. | **Reverted in Phase 2D.** The first dry run showed `issues: write` is not enough to comment on a PR (HTTP 403). Jobs now have `contents: read`, `pull-requests: write`, `issues: read`, `statuses: write`; see [Phase 2D](#phase-2d-permission-to-comment-on-pull-requests). `test_workflows.test_job_permissions_minimal`, `test_phase2d` |
 | L-6 | Forged statuses or more than 1,000 statuses on a commit block reviews. | Not changed: it fails closed (no call). | Documented |
 | L-7 | Tiered (long-context) pricing is not modelled. | Not changed: one input and one output price. | Documented: enter the higher price, or keep `AI_REVIEW_MAX_DIFF_CHARS` low |
 
@@ -333,3 +337,77 @@ test names as annotations, so results can be read without the full log.
 - `AI_REVIEW_MODE` is still unset, so everything stays off. No API key, secret, variable, environment or repository setting was created or changed.
 - No pull request code is checked out or run. The reviewer still has no comment triggers and no approve, merge or deploy ability.
 - Human approval requirements and branch settings were not touched.
+
+## Phase 2D: permission to comment on pull requests
+
+**Date:** 2026-10-26. **Branch:** `dexter/phase-2d-permissions-fix`.
+
+### What happened
+
+The first free dry run (workflow run #3, manual, `pr_number` = 3, from `main` at
+`cb87b1e`) stopped with:
+
+```
+AI review stopped: GitHub API POST /repos/ronnieshorthose-cpu/dexter-sandbox/issues/3/comments returned HTTP 403
+```
+
+The job log's "GITHUB_TOKEN Permissions" group showed `Contents: read`,
+`Issues: write`, `Metadata: read`, `PullRequests: read`, `Statuses: write`, so
+the job got exactly what the workflow asked for. The read calls before the
+comment succeeded. No comment or status was written, OpenAI was not called, and
+`AI_REVIEW_MODE` was returned to `disabled` by the owner.
+
+### Cause
+
+PR #3 is a pull request. GitHub accepts pull request numbers on the issues
+comments API, but for a pull request it checks the **pull-requests** permission
+of a GitHub App token such as `GITHUB_TOKEN`, not the issues permission. L-5
+had made `pull-requests` read only, so the comment was refused. It was not caused by:
+- the repository's read-only default, which a job's `permissions:` block replaces;
+- "Allow GitHub Actions to create and approve pull requests", which covers
+  creating pull requests and approving reviews, not comments;
+- a missing token.
+
+GitHub's response body is deliberately not logged, so its exact message was not
+seen.
+
+### Fix
+
+Both reviewer jobs now have `contents: read`, `pull-requests: write`,
+`issues: read`, `statuses: write`. `issues` is read only because nothing writes
+to real issues. The workflow-wide default stays `permissions: {}`, and the other
+two workflows are unchanged.
+
+### Authority added by `pull-requests: write`
+
+Besides commenting, a `GITHUB_TOKEN` with `pull-requests: write` can, among other
+things:
+- submit reviews, including approvals;
+- open pull requests;
+- edit a pull request's title, body or base branch, and close or reopen it;
+- request or remove reviewers;
+- add, edit or delete comments and review comments on pull requests.
+
+### How it is restricted
+
+| Capability | Restriction |
+|---|---|
+| Approving a pull request, opening a pull request | GitHub refuses both from `GITHUB_TOKEN` while "Allow GitHub Actions to create and approve pull requests" is off. The owner reported it is off on 2026-10-26; Dexter cannot read it. It must stay off. The "Protect Dexter Main" ruleset requires 0 approvals, so an approval would not be needed to merge anyway (see R-1). |
+| Merging | Needs `contents: write`, which no workflow has (`test_phase2d.test_no_workflow_can_push_or_merge`). |
+| Editing, closing, review requests, other comments | The token is only used by reviewer code from `main`; PR code is never checked out or run, and fork PRs are skipped. The client writes only `POST /issues/N/comments`, `PATCH /issues/comments/ID` and `POST /statuses/SHA` (`test_phase2d.ClientWriteScopeTests`). |
+| A malicious change to the reviewer that uses the new authority | Would have to be merged to `main` first. Human review of every PR remains the control; see R-1 for the ruleset's gaps. |
+
+### Remaining risk
+
+- Approval protection now depends on a repository setting instead of the token's
+  permissions. If someone turns the setting on, the reviewer's token could
+  approve pull requests if its code were changed to do so.
+- The fix has not yet run on GitHub. The next dry run (README Activation step 5)
+  checks it: the comment must appear, the log must show `PullRequests: write` and
+  `Issues: read`, and PR #3 must have no new review or approval.
+
+### What did not change
+
+- `AI_REVIEW_MODE` stays `disabled`. No secret, variable, environment, ruleset or
+  repository setting was created or changed, and no paid call was made.
+- Human approval is still required to merge, deploy, and run any live review.
