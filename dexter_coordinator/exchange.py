@@ -139,6 +139,8 @@ class Exchange:
 
 
 def _write_new(path, text):
+    if os.path.lexists(path):  # also a dangling symbolic link, which Windows would follow
+        raise ExchangeError(f"{path} already exists; Dexter never replaces existing files")
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
         fd = os.open(path, flags, 0o600)

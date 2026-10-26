@@ -183,6 +183,17 @@ The new tests are in `tests/test_guided_workflow.py` (30) and
 
 ## Problems encountered
 
+- **Windows found a Phase 3A gap, now fixed.** The first `windows-latest` run
+  failed one Phase 3A test, `test_backup_refuses_a_dangling_symlink`. Windows
+  has no `O_NOFOLLOW`, so creating a file at a dangling symbolic link followed
+  the link and created its target.
+  - **Fix:** `store._create_private_file` and the new `exchange._write_new` now
+    refuse any path that already exists, including a dangling link, before
+    opening it.
+  - **Regression test:** added for the exchange files.
+  - **Remaining limit:** a small race is left on Windows, between the check and
+    the creation. Creating symbolic links there normally needs administrator
+    rights or Developer Mode.
 - **Windows not yet run.** The code was written and tested on Linux. The new
   `windows-latest` job will be the first real Windows run, including the Phase
   3A tests on Windows.

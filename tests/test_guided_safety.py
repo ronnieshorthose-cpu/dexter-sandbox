@@ -306,6 +306,18 @@ class ExchangeTests(GuidedTestCase):
         with self.assertRaises(ExchangeError):
             Exchange(self.path).reply_file("HO-0001")
 
+    def test_dangling_symbolic_link_is_not_followed(self):
+        ex = Exchange(self.path)
+        folder = ex.folder("reports")
+        target = os.path.join(self.dir, "elsewhere.md")
+        try:
+            os.symlink(target, os.path.join(folder, "PRJ-001-report-x.md"))
+        except (OSError, NotImplementedError):
+            self.skipTest("symbolic links are not available")
+        with self.assertRaises(ExchangeError):
+            ex.save_report("PRJ-001", "x", "text")
+        self.assertFalse(os.path.exists(target))
+
     def test_symbolic_link_dashboard_is_not_replaced(self):
         ex = Exchange(self.path)
         ex.folder()
