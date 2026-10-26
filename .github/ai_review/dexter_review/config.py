@@ -32,6 +32,11 @@ MAX_OUTPUT_TOKENS_LIMIT = 16000
 MAX_DIFF_CHARS_LIMIT = 400_000
 MAX_PAID_CALLS_PER_PR_LIMIT = 50
 MAX_COST_PER_RUN_LIMIT_USD = 5.0
+MAX_COST_PER_PR_LIMIT_USD = 25.0
+
+# Paid attempts one run may make (the first try plus one retry). The runner
+# lowers this further when the remaining per-PR budget is smaller.
+MAX_ATTEMPTS_PER_RUN = 2
 
 # Value the owner must set to confirm they approve paid calls.
 PAID_CALLS_APPROVAL_PHRASE = "approved-by-owner"
@@ -57,6 +62,7 @@ class Config:
     price_output_per_mtok: float
     max_paid_calls_per_pr: int
     max_cost_per_run_usd: float
+    max_cost_per_pr_usd: float
     max_output_tokens: int
     max_diff_chars: int
     reasoning_effort: str
@@ -123,6 +129,9 @@ def load_config(env):
         max_cost_per_run_usd=_money(
             env, "AI_REVIEW_MAX_COST_PER_RUN_USD", MAX_COST_PER_RUN_LIMIT_USD
         ),
+        max_cost_per_pr_usd=_money(
+            env, "AI_REVIEW_MAX_COST_PER_PR_USD", MAX_COST_PER_PR_LIMIT_USD
+        ),
         max_output_tokens=_int(
             env, "AI_REVIEW_MAX_OUTPUT_TOKENS", 4000, 256, MAX_OUTPUT_TOKENS_LIMIT
         ),
@@ -155,6 +164,8 @@ def live_blockers(cfg):
         blockers.append("AI_REVIEW_MAX_PAID_CALLS_PER_PR is 0")
     if cfg.max_cost_per_run_usd <= 0:
         blockers.append("AI_REVIEW_MAX_COST_PER_RUN_USD is 0")
+    if cfg.max_cost_per_pr_usd <= 0:
+        blockers.append("AI_REVIEW_MAX_COST_PER_PR_USD is 0")
     if not cfg.openai_api_key:
         blockers.append("OPENAI_API_KEY is not available to this job")
     return blockers

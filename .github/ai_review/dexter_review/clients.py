@@ -5,15 +5,19 @@ Error messages never include request headers, tokens, or response bodies
 beyond a short machine-readable error code.
 """
 
+import http.client
 import json
 import re
-import socket
 import urllib.error
 import urllib.request
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 OPENAI_URL = "https://api.openai.com/v1/responses"
 GITHUB_API = "https://api.github.com"
+
+# Every way a request can fail below the HTTP layer: DNS, TLS, timeouts, resets,
+# and a connection dropped while the body is being read (IncompleteRead).
+_NETWORK_ERRORS = (OSError, http.client.HTTPException)
 
 
 class HTTPError(Exception):
@@ -30,8 +34,11 @@ def urllib_transport(method, url, headers, body, timeout):
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, response.read()
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()
-    except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as exc:
+        try:
+            return exc.code, exc.read()
+        except _NETWORK_ERRORS:
+            return exc.code, b""
+    except _NETWORK_ERRORS as exc:
         raise HTTPError(0, f"network error: {type(exc).__name__}") from None
 
 
@@ -94,18 +101,33 @@ class GitHubClient:
         )
         return raw.decode("utf-8", errors="replace")
 
-    def list_issue_comments(self, number, max_pages=10):
-        comments = []
+    def _list_all(self, path, what, max_pages):
+        """Read every page, or raise: a truncated list could hide the spending counter."""
+        items = []
         for page in range(1, max_pages + 1):
-            batch = self._json(
-                "GET", f"/repos/{self.repo}/issues/{int(number)}/comments?per_page=100&page={page}"
-            )
+            batch = self._json("GET", f"{path}?per_page=100&page={page}")
             if not isinstance(batch, list):
-                raise HTTPError(0, "GitHub API returned an unexpected comment list")
-            comments.extend(batch)
+                raise HTTPError(0, f"GitHub API returned an unexpected {what} list")
+            items.extend(batch)
             if len(batch) < 100:
-                break
-        return comments
+                return items
+        raise HTTPError(0, f"too many {what}s to read them all safely")
+
+    def list_issue_comments(self, number, max_pages=10):
+        return self._list_all(f"/repos/{self.repo}/issues/{int(number)}/comments", "comment", max_pages)
+
+    def list_pull_files(self, number, max_pages=30):
+        """Every changed file of the PR (GitHub lists at most 3,000)."""
+        return self._list_all(f"/repos/{self.repo}/pulls/{int(number)}/files", "file", max_pages)
+
+    def list_pull_commits(self, number, max_pages=3):
+        """Every commit of the PR (GitHub lists at most 250)."""
+        return self._list_all(f"/repos/{self.repo}/pulls/{int(number)}/commits", "commit", max_pages)
+
+    def list_statuses(self, sha, max_pages=10):
+        if not SHA_RE.fullmatch(sha):
+            raise ValueError("invalid commit SHA")
+        return self._list_all(f"/repos/{self.repo}/commits/{sha}/statuses", "status", max_pages)
 
     def create_comment(self, number, body):
         return self._json("POST", f"/repos/{self.repo}/issues/{int(number)}/comments", {"body": body})

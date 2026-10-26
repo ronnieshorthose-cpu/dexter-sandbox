@@ -29,9 +29,12 @@ on:
 
 permissions: {}
 
+# One run per PR at a time. A run already in progress is never cancelled,
+# because cancelling it mid-call would throw away a paid response; a newer
+# run waits, and the finished one marks its comment STALE if the PR moved.
 concurrency:
   group: dexter-ai-review-pr-${{ github.event.pull_request.number || inputs.pr_number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   dry-run:
@@ -45,7 +48,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read
+      issues: write
       statuses: write
     steps:
       - name: Check out the trusted default-branch copy of the reviewer
@@ -62,6 +66,7 @@ jobs:
           AI_REVIEW_PRICE_OUTPUT_USD_PER_MTOK: ${{ vars.AI_REVIEW_PRICE_OUTPUT_USD_PER_MTOK }}
           AI_REVIEW_MAX_PAID_CALLS_PER_PR: ${{ vars.AI_REVIEW_MAX_PAID_CALLS_PER_PR }}
           AI_REVIEW_MAX_COST_PER_RUN_USD: ${{ vars.AI_REVIEW_MAX_COST_PER_RUN_USD }}
+          AI_REVIEW_MAX_COST_PER_PR_USD: ${{ vars.AI_REVIEW_MAX_COST_PER_PR_USD }}
           AI_REVIEW_MAX_OUTPUT_TOKENS: ${{ vars.AI_REVIEW_MAX_OUTPUT_TOKENS }}
           AI_REVIEW_MAX_DIFF_CHARS: ${{ vars.AI_REVIEW_MAX_DIFF_CHARS }}
           AI_REVIEW_REASONING_EFFORT: ${{ vars.AI_REVIEW_REASONING_EFFORT }}
@@ -80,10 +85,13 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Comments go through the issues API, so pull-requests stays read-only:
+    # this token cannot submit a pull request review or approval.
     environment: ai-review
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read
+      issues: write
       statuses: write
     steps:
       - name: Check out the trusted default-branch copy of the reviewer
@@ -101,6 +109,7 @@ jobs:
           AI_REVIEW_PRICE_OUTPUT_USD_PER_MTOK: ${{ vars.AI_REVIEW_PRICE_OUTPUT_USD_PER_MTOK }}
           AI_REVIEW_MAX_PAID_CALLS_PER_PR: ${{ vars.AI_REVIEW_MAX_PAID_CALLS_PER_PR }}
           AI_REVIEW_MAX_COST_PER_RUN_USD: ${{ vars.AI_REVIEW_MAX_COST_PER_RUN_USD }}
+          AI_REVIEW_MAX_COST_PER_PR_USD: ${{ vars.AI_REVIEW_MAX_COST_PER_PR_USD }}
           AI_REVIEW_MAX_OUTPUT_TOKENS: ${{ vars.AI_REVIEW_MAX_OUTPUT_TOKENS }}
           AI_REVIEW_MAX_DIFF_CHARS: ${{ vars.AI_REVIEW_MAX_DIFF_CHARS }}
           AI_REVIEW_REASONING_EFFORT: ${{ vars.AI_REVIEW_REASONING_EFFORT }}

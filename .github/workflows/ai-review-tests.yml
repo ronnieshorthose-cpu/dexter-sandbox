@@ -18,7 +18,16 @@ jobs:
         with:
           persist-credentials: false
       - name: AI reviewer tests
-        run: python3 -m unittest discover -s .github/ai_review/reviewer_tests -t .github/ai_review -v
+        # The result line and any failing test names are also shown as
+        # annotations, so the outcome can be read without the full log.
+        run: |
+          set +e -o pipefail
+          python3 -m unittest discover -s .github/ai_review/reviewer_tests -t .github/ai_review -v 2>&1 | tee "$RUNNER_TEMP/ai-review-tests.log"
+          status=$?
+          grep -E '^(FAIL|ERROR): ' "$RUNNER_TEMP/ai-review-tests.log" | head -50 | sed 's/^/::error title=AI reviewer test::/'
+          summary="$(grep -E '^Ran [0-9]+ tests? in ' "$RUNNER_TEMP/ai-review-tests.log" | tail -1) - $(tail -1 "$RUNNER_TEMP/ai-review-tests.log")"
+          echo "::notice title=AI reviewer tests::$summary"
+          exit $status
       - name: Application tests (if present)
         run: |
           if [ -d tests ]; then
