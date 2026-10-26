@@ -22,19 +22,62 @@ and the PR branch is in this repository (forks are never reviewed)
   ▼
 Script: re-reads the PR from the API → refuses forks/closed/drafts → stops if a
 newer commit exists → stops if this commit was already reviewed → fetches the
-diff pinned to the exact base/head SHAs → withholds lockfiles, binaries,
-.env/key files and anything that looks like a credential → caps the size
+diff pinned to the exact base/head SHAs → checks GitHub returned every changed
+file → withholds lockfiles, binaries, sensitive file names and anything that
+looks like a credential → caps the size
   ▼
-dry-run: posts "DRY RUN — no AI review performed" (no OpenAI call, no key)
-live:    checks every spending gate → reserves the call in the PR's counter →
-         calls OpenAI (Responses API, strict JSON schema, store=false, no tools)
-         → validates the reply → re-checks the PR head SHA → posts the result
+dry-run: posts "DRY RUN — no AI review performed" (no OpenAI call, no key);
+         never overwrites a real review
+live:    checks every gate → reads the spending ledger → limits this run's
+         attempts to what the per-PR and per-run limits allow → reserves the
+         worst case (ledger status + comment) → calls OpenAI (Responses API,
+         strict JSON schema, store=false, no tools) → validates the reply →
+         re-checks the PR head SHA → posts the result
   ▼
 Commit status "Dexter AI review (advisory)" on the reviewed SHA only:
   success  = review ran to completion (NOT approval)
   failure  = partial review, dry run, or a spending limit stopped it
   error    = review failed or is not configured
+  pending  = a paid call is reserved / in progress (these are the ledger)
 ```
+
+## Safety controls
+
+See `docs/PHASE-2C-SECURITY-ASSESSMENT.md` for the reasoning and remaining risks.
+
+**Spending.** These are software limits, **not a billing guarantee**. Only the
+OpenAI project budget can actually cap charges.
+- Off by default; live needs every gate listed under Configuration.
+- Per-run limit on the *worst-case* cost: every attempt is assumed to bill its
+  full input (one token per UTF-8 byte, plus overhead) and the full output allowance.
+- Per-PR limits on paid attempts and on total worst-case spend. Retries count,
+  and a run never retries past either limit.
+- The worst case is reserved **before** the call, both in the PR comment and as
+  a commit status. Statuses cannot be deleted, so deleting or editing the comment
+  does not reset the count for that commit. If the reservation cannot be
+  recorded, no call is made.
+- The same commit is never re-reviewed automatically after it completed,
+  failed or was interrupted; a manual run (counted) is needed.
+- A run in progress is never cancelled by a newer one, so a paid response is not thrown away.
+
+**Untrusted input.** PR titles, bodies and comments are never read. File
+names, diff text and the list of omitted files go to the model only inside a
+random-token boundary, labelled as untrusted data. The model has no tools. Its
+reply must match a strict schema with no approval field. Every text field is
+sanitised before posting: no HTML, links, images, mentions, headings, or
+invisible/bidirectional characters.
+
+**Reliability.** Every comment names the exact reviewed commit and diff range.
+Results are **completed**, **PARTIAL** (anything withheld, truncated,
+unparseable, or missing from GitHub's diff), **FAILED**, **blocked**, **dry run** or
+**nothing to review**. Only *completed* gives a green status. A review that
+finishes after the PR moves is marked **STALE**. Comments always fit GitHub's
+size limit.
+
+**Failure handling.** Malformed configuration, events, SHAs, API responses,
+token counts, or an unreadable spending ledger all stop the run before any paid
+call. Errors after a paid call still end in a FAILED comment and status.
+Error messages never include tokens or response bodies.
 
 ## Files
 
@@ -61,6 +104,7 @@ Repository variables (Settings → Secrets and variables → Actions → Variabl
 | `AI_REVIEW_PRICE_OUTPUT_USD_PER_MTOK` | unset | Output price per 1M tokens (reasoning tokens bill as output) |
 | `AI_REVIEW_MAX_PAID_CALLS_PER_PR` | `0` | Paid API attempts allowed per PR (hard ceiling 50) |
 | `AI_REVIEW_MAX_COST_PER_RUN_USD` | `0` | Worst-case cost allowed per run (hard ceiling $5) |
+| `AI_REVIEW_MAX_COST_PER_PR_USD` | `0` | Worst-case cost allowed per PR, all runs together (hard ceiling $25) |
 | `AI_REVIEW_MAX_OUTPUT_TOKENS` | `4000` | Output cap per call (256–16000) |
 | `AI_REVIEW_MAX_DIFF_CHARS` | `100000` | Diff size sent (1000–400000); larger diffs are reported PARTIAL |
 | `AI_REVIEW_REASONING_EFFORT` | unset | Optional `low`/`medium`/`high` |
@@ -69,10 +113,12 @@ Repository variables (Settings → Secrets and variables → Actions → Variabl
 Environment secret (Settings → Environments → `ai-review` → Secrets): `OPENAI_API_KEY`.
 
 Before any live call the script requires **all** of: mode `live`, the approval
-phrase, a verified model, both prices, a non-zero per-PR cap, a non-zero
-per-run cost limit, the key, the default-branch ref, and a same-repository PR.
-It also refuses if its worst-case estimate (full input + maximum output, times
-2 attempts) is above the per-run limit.
+phrase, a verified model, both prices, a non-zero per-PR call cap, non-zero
+per-run and per-PR cost limits, the key, the default-branch ref, a
+same-repository PR, and a readable spending ledger.
+It refuses if one worst-case attempt (full input + maximum output) is above the
+per-run limit, or would take the PR over its per-PR cost limit. It makes a
+retry only if the second attempt also fits within every limit.
 
 ## Security assumptions (verified against GitHub's documentation, 2026-10-26)
 
@@ -140,19 +186,32 @@ Do these in order. Stop at any unexpected result. Nothing here is done by Dexter
    input and output prices.
 7. **Configure live**: add environment secret `OPENAI_API_KEY`; set variables
    `AI_REVIEW_MODEL`, both prices, `AI_REVIEW_MAX_PAID_CALLS_PER_PR` (suggest `3`),
-   `AI_REVIEW_MAX_COST_PER_RUN_USD` (suggest `0.50`), and finally
-   `AI_REVIEW_PAID_CALLS_APPROVED` = `approved-by-owner` and `AI_REVIEW_MODE` = `live`.
+   `AI_REVIEW_MAX_COST_PER_RUN_USD` (suggest `0.50`), `AI_REVIEW_MAX_COST_PER_PR_USD`
+   (suggest `1.50`), and finally `AI_REVIEW_PAID_CALLS_APPROVED` = `approved-by-owner`
+   and `AI_REVIEW_MODE` = `live`. The dry run in step 5 shows the worst-case cost per run
+   for PR #3. If it is above the per-run limit, lower `AI_REVIEW_MAX_DIFF_CHARS` or raise the limit.
 8. **First live review**: Run workflow with `pr_number` = `3`, approve the
    environment prompt, and check the comment, status, and OpenAI usage page.
 
 **To stop everything at once:** set `AI_REVIEW_MODE` to `disabled` (or delete it).
 
+Do not make "Dexter AI review (advisory)" a required status check. Anyone with
+`statuses: write` can post a status with that name, and the review is advisory.
+
 ## Known limitations
 
-- Prices are not built in; the owner must keep the two price variables current.
-- The per-PR counter lives in the bot's comment. Anyone with write access can edit
-  that comment, and two overlapping runs could undercount by one. Organisation-wide
-  spending is capped only by the OpenAI project budget.
+Full list with recommended actions: `docs/PHASE-2C-SECURITY-ASSESSMENT.md` (R-1 to R-8).
+
+- **The software spending limits are not a billing guarantee.** They rely on the
+  owner-entered prices and on GitHub data. Only the OpenAI project budget can cap charges.
+- There is no repository-wide or daily cap; per-run approval on the `ai-review`
+  environment and the OpenAI project budget cover that.
+- Anyone with write access can edit or delete the bot comment. The status ledger
+  keeps the count for the current commit, but deleting the comment and pushing a
+  new commit starts a fresh count. Write access must therefore be treated as trusted.
+- The worst-case estimate deliberately over-states cost (about 3 times for ordinary
+  code), so the per-PR spend shown in the comment is an upper bound, not a bill.
+- Prompt injection and secret detection are mitigated, not eliminated.
 - The reviewer sees only the diff, not the whole repository.
 - Anyone with write access can change `main`, and so the reviewer, until branch
   protection is enabled on `main`.

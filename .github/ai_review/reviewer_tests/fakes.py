@@ -4,6 +4,7 @@ import json
 
 from dexter_review.clients import HTTPError, OpenAIError
 from dexter_review.config import PAID_CALLS_APPROVAL_PHRASE, load_config
+from dexter_review.diffing import split_diff
 from dexter_review.render import BOT_LOGIN
 
 REPO = "owner/sandbox"
@@ -28,6 +29,7 @@ LIVE_ENV = {
     "AI_REVIEW_PRICE_OUTPUT_USD_PER_MTOK": "10",
     "AI_REVIEW_MAX_PAID_CALLS_PER_PR": "3",
     "AI_REVIEW_MAX_COST_PER_RUN_USD": "1.00",
+    "AI_REVIEW_MAX_COST_PER_PR_USD": "3.00",
     "AI_REVIEW_PAID_CALLS_APPROVED": PAID_CALLS_APPROVAL_PHRASE,
     "OPENAI_API_KEY": "test-key-not-real",
     "GH_TOKEN": "test-gh-token",
@@ -84,11 +86,15 @@ def openai_response(text=None, status="completed", usage=None):
 class FakeGitHub:
     def __init__(self, pr=None, diff=SIMPLE_DIFF):
         self.pr = pr or pr_payload()
+        # Like GitHub, report how many files the PR changes, unless a test overrides it.
+        self.pr.setdefault("changed_files", len(split_diff(diff)))
         self.head_after_review = None  # simulate a push while the review runs
+        self.get_pull_error_after_review = None
         self.diff = diff
         self.diff_error = None
         self.comments = []
         self.statuses = []
+        self.status_records = []  # what the statuses API returns, newest first
         self.calls = []
         self._next_id = 100
         self._get_pull_count = 0
@@ -96,6 +102,8 @@ class FakeGitHub:
     def get_pull(self, number):
         self.calls.append(("get_pull", number))
         self._get_pull_count += 1
+        if self._get_pull_count > 1 and self.get_pull_error_after_review:
+            raise self.get_pull_error_after_review
         if self._get_pull_count > 1 and self.head_after_review:
             pr = json.loads(json.dumps(self.pr))
             pr["head"]["sha"] = self.head_after_review
@@ -132,6 +140,17 @@ class FakeGitHub:
     def create_status(self, sha, state, description, context, target_url=""):
         assert len(description) <= 140, description
         self.statuses.append((sha, state, description))
+        self.add_status(sha, state, description, context)
+
+    def add_status(self, sha, state, description, context, login=BOT_LOGIN):
+        self.status_records.insert(0, {
+            "sha": sha, "state": state, "description": description, "context": context,
+            "creator": {"login": login, "type": "Bot" if login == BOT_LOGIN else "User"},
+        })
+
+    def list_statuses(self, sha):
+        self.calls.append(("list_statuses", sha))
+        return [dict(s) for s in self.status_records if s["sha"] == sha]
 
     def bot_bodies(self):
         return [c["body"] for c in self.comments if c["user"]["login"] == BOT_LOGIN]

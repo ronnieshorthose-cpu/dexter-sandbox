@@ -122,9 +122,25 @@ class ReviewerWorkflowTests(unittest.TestCase):
             with self.subTest(job=job):
                 self.assertEqual(granted, {"contents: read", "pull-requests: write", "statuses: write"})
 
-    def test_concurrency_per_pr_with_cancel(self):
-        self.assertIn("cancel-in-progress: true", self.text)
+    def test_concurrency_per_pr_never_cancels_a_paid_call(self):
+        # C-10: cancelling an in-progress run would discard a response already paid for.
+        self.assertIn("cancel-in-progress: false", self.text)
+        self.assertNotIn("cancel-in-progress: true", self.text)
         self.assertIn("github.event.pull_request.number || inputs.pr_number", self.text)
+
+    def test_spending_variables_passed_to_both_jobs(self):
+        for job in ("dry-run", "live"):
+            section = job_section(self.text, job)
+            for var in (
+                "AI_REVIEW_MAX_PAID_CALLS_PER_PR", "AI_REVIEW_MAX_COST_PER_RUN_USD", "AI_REVIEW_MAX_COST_PER_PR_USD",
+            ):
+                with self.subTest(job=job, var=var):
+                    self.assertIn(f"{var}: ${{{{ vars.{var} }}}}", section)
+
+    def test_live_mode_is_not_hard_coded_on(self):
+        # AI_REVIEW_MODE must come only from the repository variable gate.
+        self.assertNotRegex(self.text, r"vars\.AI_REVIEW_MODE\s*!=")
+        self.assertNotIn("AI_REVIEW_MODE: ${{", self.text)
 
     def test_isolated_python_flags(self):
         self.assertEqual(self.text.count("python3 -E -s -m dexter_review"), 2)

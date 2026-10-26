@@ -243,7 +243,9 @@ class SpendingLimitTests(unittest.TestCase):
         gh = FakeGitHub()
         run(gh=gh, client=Spy())
         self.assertEqual(seen["marker"].state, "in-progress")
-        self.assertEqual(seen["marker"].paid_calls, 1)
+        # Both allowed attempts (first try + retry) are reserved up front.
+        self.assertEqual(seen["marker"].paid_calls, 2)
+        self.assertEqual(last_marker(gh).paid_calls, 1)  # settled to the attempts actually made
 
     def test_retries_are_counted(self):
         client = FakeOpenAI(OpenAIError("HTTP 500", True, 500), openai_response())
@@ -299,13 +301,16 @@ class FailureTests(unittest.TestCase):
         self.assertEqual(spy.created, 0)
         self.assertEqual(gh.statuses[-1][1], "error")
 
-    def test_status_write_failure_does_not_crash(self):
+    def test_result_status_write_failure_does_not_crash(self):
         gh = FakeGitHub()
+        real = gh.create_status
 
-        def broken(*args, **kwargs):
-            raise HTTPError(403, "forbidden")
+        def broken_after_reservation(sha, state, *args, **kwargs):
+            if state != "pending":
+                raise HTTPError(403, "forbidden")
+            return real(sha, state, *args, **kwargs)
 
-        gh.create_status = broken
+        gh.create_status = broken_after_reservation
         result, _, _ = run(gh=gh)
         self.assertEqual(result.outcome, "completed")
         self.assertTrue(any("could not set commit status" in line for line in result.log))

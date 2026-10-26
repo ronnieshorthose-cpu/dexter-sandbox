@@ -2,6 +2,7 @@
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 
 BOT_LOGIN = "github-actions[bot]"
@@ -9,6 +10,12 @@ STATUS_CONTEXT = "Dexter AI review (advisory)"
 MARKER_PREFIX = "<!-- dexter-ai-review:v1 "
 _MARKER_RE = re.compile(r"^<!-- dexter-ai-review:v1 (\{[^\n]*\}) -->\n")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+# GitHub rejects comments longer than 65,536 characters. Stay well below it so
+# a paid review can always be posted.
+MAX_COMMENT_CHARS = 60_000
+MAX_OMITTED_SHOWN = 50
+MAX_COST_MICRO = 10**9  # $1000; anything larger in a marker is treated as corrupt
 
 STATES = ("in-progress", "completed", "partial", "failed", "blocked", "dry-run", "nothing-to-review")
 
@@ -34,6 +41,7 @@ class Marker:
     sha: str
     state: str
     paid_calls: int
+    cost_micro: object = None  # worst-case spend recorded on the PR, in millionths of a dollar
 
 
 @dataclass(frozen=True)
@@ -42,20 +50,28 @@ class BotComment:
     marker: Marker
 
 
+def _strip_invisible(text):
+    """Drop control and format characters (bidi overrides, zero-width spaces, BOMs)."""
+    return "".join(
+        ch for ch in text if ch in "\n\t" or unicodedata.category(ch) not in ("Cc", "Cf", "Co", "Cs")
+    )
+
+
 def sanitize(text, limit=2000):
     """Neutralise untrusted text so it renders as plain inline text.
 
     Removes HTML/comments (so model output cannot forge a state marker), breaks
     @mentions, disables links/images, and collapses newlines so the text cannot
-    start headings, quotes, tables, or a fake banner.
+    start headings, quotes, tables, or a fake banner. Invisible and
+    direction-changing characters are removed so text cannot be disguised.
     """
-    text = str(text)
-    text = "".join(ch for ch in text if ch == "\n" or ch == "\t" or ord(ch) >= 32)
+    text = _strip_invisible(str(text))
     text = re.sub(r"\s+", " ", text).strip()
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     text = re.sub(r"([\\`*_\[\]()!|#~])", r"\\\1", text)
     text = text.replace("@", "@​")
     text = re.sub(r"(?i)\b(https?|ftp)://", r"\1[:]//", text)
+    text = re.sub(r"(?i)\bwww\.", "www[.]", text)
     if len(text) > limit:
         text = text[: limit - 1] + "…"
     return text
@@ -63,16 +79,19 @@ def sanitize(text, limit=2000):
 
 def code_span(text, limit=300):
     """Render a path or ID inside a code span that cannot be broken out of."""
-    text = re.sub(r"[`\r\n]", "'", str(text))[:limit]
+    text = re.sub(r"[`\r\n]", "'", _strip_invisible(str(text)))[:limit]
     return f"`` {text} ``"
 
 
 def render_marker(marker):
-    payload = json.dumps(
-        {"sha": marker.sha, "state": marker.state, "paid_calls": marker.paid_calls},
-        separators=(",", ":"),
-    )
-    return f"{MARKER_PREFIX}{payload} -->\n"
+    data = {"sha": marker.sha, "state": marker.state, "paid_calls": marker.paid_calls}
+    if marker.cost_micro is not None:
+        data["cost_micro"] = marker.cost_micro
+    return f"{MARKER_PREFIX}{json.dumps(data, separators=(',', ':'))} -->\n"
+
+
+def _small_int(value, hi):
+    return not isinstance(value, bool) and isinstance(value, int) and 0 <= value <= hi
 
 
 def parse_marker(body):
@@ -93,9 +112,12 @@ def parse_marker(body):
         return None
     if state not in STATES:
         return None
-    if isinstance(calls, bool) or not isinstance(calls, int) or not 0 <= calls <= 10_000:
+    if not _small_int(calls, 10_000):
         return None
-    return Marker(sha=sha, state=state, paid_calls=calls)
+    cost = data.get("cost_micro")
+    if cost is not None and not _small_int(cost, MAX_COST_MICRO):
+        return None
+    return Marker(sha=sha, state=state, paid_calls=calls, cost_micro=cost)
 
 
 def find_bot_comment(comments):
@@ -116,18 +138,9 @@ def find_bot_comment(comments):
     return found
 
 
-def render_comment(
-    marker,
-    *,
-    model="",
-    detail="",
-    review=None,
-    notes=(),
-    bundle=None,
-    cap=0,
-    usage_line="",
-    stale_head="",
-    run_url="",
+def _render(
+    marker, *, model, api_model, detail, review, notes, bundle, cap, cost_cap, usage_line, stale_head,
+    base_sha, run_url,
 ):
     lines = [render_marker(marker).rstrip("\n"), "## 🤖 Dexter AI review", "", BANNER, ""]
     if stale_head:
@@ -140,9 +153,18 @@ def render_comment(
         f"**Result:** {HEADLINES[marker.state]}",
         f"**{'Reviewed commit' if marker.state in ('completed', 'partial') else 'Commit'}:** `{marker.sha}`",
     ]
+    if base_sha:
+        lines.append(f"**Diff range:** `{base_sha[:12]}...{marker.sha[:12]}` (merge base to head)")
     if model:
         lines.append(f"**Reviewer model:** {code_span(model, 80)} (OpenAI)")
+    if api_model and api_model != model:
+        lines.append(f"**Model reported by the API:** {code_span(api_model, 100)}")
     lines.append(f"**Paid API calls on this PR:** {marker.paid_calls} of {cap} allowed")
+    if marker.cost_micro is not None and cost_cap:
+        lines.append(
+            f"**Worst-case spend recorded on this PR:** ${marker.cost_micro / 1_000_000:.4f} "
+            f"of ${cost_cap:.2f} allowed (an upper-bound estimate, not a bill)"
+        )
     if usage_line:
         lines.append(f"**Usage:** {usage_line}")
     if run_url:
@@ -174,8 +196,47 @@ def render_comment(
         lines += ["", "### Validation notes", ""] + [f"- {sanitize(n, 200)}" for n in notes]
     if bundle is not None and bundle.omitted:
         lines += ["", "### Not reviewed", ""]
-        lines += [f"- {code_span(path)} — {reason}" for path, reason in bundle.omitted[:100]]
-        if len(bundle.omitted) > 100:
-            lines.append(f"- … and {len(bundle.omitted) - 100} more")
+        lines += [f"- {code_span(path)} — {reason}" for path, reason in bundle.omitted[:MAX_OMITTED_SHOWN]]
+        if len(bundle.omitted) > MAX_OMITTED_SHOWN:
+            lines.append(f"- … and {len(bundle.omitted) - MAX_OMITTED_SHOWN} more")
     lines += ["", "---", "_Advisory output from an automated reviewer. Findings may be wrong or incomplete._"]
     return "\n".join(lines) + "\n"
+
+
+def render_comment(
+    marker,
+    *,
+    model="",
+    api_model="",
+    detail="",
+    review=None,
+    notes=(),
+    bundle=None,
+    cap=0,
+    cost_cap=0.0,
+    usage_line="",
+    stale_head="",
+    base_sha="",
+    run_url="",
+):
+    """Render the comment, dropping trailing findings if it would exceed GitHub's size limit."""
+    findings = list(review["findings"]) if review is not None else []
+    dropped = 0
+    while True:
+        shown = dict(review, findings=findings) if review is not None else None
+        extra = list(notes)
+        if dropped:
+            extra.append(f"{dropped} more finding(s) not shown because the comment would be too long for GitHub")
+        body = _render(
+            marker, model=model, api_model=api_model, detail=detail, review=shown, notes=extra, bundle=bundle,
+            cap=cap, cost_cap=cost_cap, usage_line=usage_line, stale_head=stale_head, base_sha=base_sha,
+            run_url=run_url,
+        )
+        if len(body) <= MAX_COMMENT_CHARS or not findings:
+            break
+        findings.pop()
+        dropped += 1
+    if len(body) > MAX_COMMENT_CHARS:
+        # Last resort. The marker is on the first line, so it always survives.
+        body = body[: MAX_COMMENT_CHARS - 100] + "\n\n_[Comment shortened to fit GitHub's size limit.]_\n"
+    return body
