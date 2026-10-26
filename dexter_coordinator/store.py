@@ -178,6 +178,10 @@ def _expected_objects():
 
 def _create_private_file(path):
     """Create an empty file readable only by its owner; never follow or replace an existing path."""
+    # Windows has no O_NOFOLLOW, and there O_CREAT | O_EXCL follows a dangling symbolic
+    # link and creates its target. lexists() is true for any link, dangling or not.
+    if os.path.lexists(path):
+        raise FileExistsError(path)
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600)
     os.close(fd)

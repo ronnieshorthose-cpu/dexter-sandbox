@@ -928,6 +928,13 @@ class Coordinator:
             params.append(self._task_row(task_key)["id"])
         return [self.get_handoff(r["key"]) for r in self.store.all(sql + " ORDER BY id", params)]
 
+    def handoff_is_current(self, key):
+        """Read-only: True if the handoff was prepared in the task's current state for its
+        current content, so its reply can count as evidence for the task's next step."""
+        row = self._handoff_row(key)
+        task = self.store.one("SELECT * FROM tasks WHERE id = ?", (row["task_id"],))
+        return task["state_seq"] == row["task_state_seq"] and self._content_hash(task) == row["task_content_hash"]
+
     def mark_handoff_sent(self, key, passphrase=None):
         """The owner confirms they copied the message to the assistant. Not a confirmed delivery."""
         row = self._handoff_row(key)
