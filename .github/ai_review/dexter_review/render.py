@@ -159,7 +159,10 @@ def _render(
         lines.append(f"**Reviewer model:** {code_span(model, 80)} (OpenAI)")
     if api_model and api_model != model:
         lines.append(f"**Model reported by the API:** {code_span(api_model, 100)}")
-    lines.append(f"**Paid API calls on this PR:** {marker.paid_calls} of {cap} allowed")
+    lines.append(
+        f"**Paid API calls reserved on this PR:** {marker.paid_calls} of {cap} allowed "
+        "(worst case, from the commit-status ledger)"
+    )
     if marker.cost_micro is not None and cost_cap:
         lines.append(
             f"**Worst-case spend recorded on this PR:** ${marker.cost_micro / 1_000_000:.4f} "

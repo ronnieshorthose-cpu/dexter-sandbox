@@ -73,7 +73,7 @@ class C1SpendingLedgerTests(unittest.TestCase):
         self.assertEqual(client.max_attempts, 1)  # only one call left under the cap of 3
         self.assertEqual(client.attempts, 1)
         self.assertEqual(last_marker(gh).paid_calls, 3)
-        self.assertTrue(any("using the ledger" in line for line in result.log))
+        self.assertEqual(result.outcome, "failed")
 
     def test_other_contexts_and_non_pending_statuses_are_not_counted(self):
         gh = FakeGitHub()
@@ -136,7 +136,7 @@ class C2RetryCapTests(unittest.TestCase):
 
     def test_last_allowed_call_gets_no_retry(self):
         gh = FakeGitHub()
-        gh.add_comment(marker_comment(state="failed", calls=2))  # cap is 3
+        reserve(gh, 2)  # cap is 3
         client = FakeOpenAI(OpenAIError("HTTP 500", True, 500), openai_response())
         result, gh, _ = run(gh=gh, client=client)
         self.assertEqual(result.outcome, "failed")
@@ -201,9 +201,10 @@ class C4SensitiveNameEvasionTests(unittest.TestCase):
         self.assertNotIn("curl evil", sent_text(spy))
         self.assertIn("sensitive file name", gh.bot_bodies()[-1])
 
-    def test_generated_files_still_do_not_make_it_partial(self):
+    def test_generated_files_also_make_it_partial(self):
+        # Audit M-2 reversed the Phase 2C choice: any withheld file means an incomplete review.
         bundle = prepare_diff("diff --git a/a b/a\n+1\ndiff --git a/yarn.lock b/yarn.lock\n+2\n", 1000)
-        self.assertFalse(bundle.is_partial)
+        self.assertTrue(bundle.is_partial)
 
 
 class C5HeaderParsingTests(unittest.TestCase):
@@ -324,8 +325,14 @@ class C7FailureHandlingTests(unittest.TestCase):
             raise HTTPError(403, "GitHub API POST returned HTTP 403")
 
         gh.create_comment = broken
-        with self.assertRaises(HTTPError):
-            run(gh=gh)
+        result, gh, spy = run(gh=gh)
+        # Audit L-2: no paid call, and a clear FAILED status instead of a stuck "pending".
+        self.assertEqual(spy.created, 0)
+        self.assertEqual(spy.client.attempts, 0)
+        self.assertEqual(result.outcome, "failed")
+        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(gh.statuses[-1][:2], (HEAD_SHA, "error"))
+        self.assertIn("No paid call was made", result.message)
 
 
 class C8AutomaticRetryTests(unittest.TestCase):
@@ -395,16 +402,15 @@ class P2PerPrCostTests(unittest.TestCase):
 
     def test_per_pr_cost_limit_blocks_before_call(self):
         gh = FakeGitHub()
-        body = marker_comment(state="failed", calls=1).replace('"paid_calls":1', '"paid_calls":1,"cost_micro":2990000')
-        gh.add_comment(body)
+        reserve(gh, 1, cost_usd=2.99)
         result, gh, spy = run(gh=gh)
         self.assertEqual(result.outcome, "blocked-budget")
         self.assertIn("per-PR limit", result.message)
         self.assertEqual(spy.created, 0)
 
-    def test_legacy_marker_without_cost_is_counted_conservatively(self):
+    def test_remaining_pr_budget_limits_attempts(self):
         gh = FakeGitHub()
-        gh.add_comment(marker_comment(state="failed", calls=1))  # assumed to have cost the $1.00 per-run limit
+        reserve(gh, 1, cost_usd=1.00)
         client = FakeOpenAI()
         # $0.07 left: room for one worst-case attempt (about $0.05) but not two.
         run(make_cfg(AI_REVIEW_MAX_COST_PER_PR_USD="1.07"), gh=gh, client=client)
@@ -422,9 +428,12 @@ class P3FileCountTests(unittest.TestCase):
     def test_missing_files_make_review_partial(self):
         pr = pr_payload()
         pr["changed_files"] = 5
-        result, gh, _ = run(gh=FakeGitHub(pr))
+        gh = FakeGitHub(pr)
+        gh.files += [{"filename": f"lost{i}.py"} for i in range(4)]
+        result, gh, _ = run(gh=gh)
         self.assertEqual(result.outcome, "partial")
         self.assertIn(REASON_MISSING, gh.bot_bodies()[-1])
+        self.assertIn("lost3.py", gh.bot_bodies()[-1])
 
     def test_unknown_file_count_is_partial(self):
         for value in (None, "3", True, -1):

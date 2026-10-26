@@ -120,7 +120,11 @@ class ReviewerWorkflowTests(unittest.TestCase):
             perms = re.search(r"permissions:\n((?:\s{6}\S.*\n)+)", section).group(1)
             granted = {line.strip() for line in perms.splitlines()}
             with self.subTest(job=job):
-                self.assertEqual(granted, {"contents: read", "pull-requests: write", "statuses: write"})
+                # L-5: comments use the issues API; pull-requests stays read-only so
+                # the token cannot submit a review or approval.
+                self.assertEqual(
+                    granted, {"contents: read", "pull-requests: read", "issues: write", "statuses: write"}
+                )
 
     def test_concurrency_per_pr_never_cancels_a_paid_call(self):
         # C-10: cancelling an in-progress run would discard a response already paid for.

@@ -116,6 +116,14 @@ class GitHubClient:
     def list_issue_comments(self, number, max_pages=10):
         return self._list_all(f"/repos/{self.repo}/issues/{int(number)}/comments", "comment", max_pages)
 
+    def list_pull_files(self, number, max_pages=30):
+        """Every changed file of the PR (GitHub lists at most 3,000)."""
+        return self._list_all(f"/repos/{self.repo}/pulls/{int(number)}/files", "file", max_pages)
+
+    def list_pull_commits(self, number, max_pages=3):
+        """Every commit of the PR (GitHub lists at most 250)."""
+        return self._list_all(f"/repos/{self.repo}/pulls/{int(number)}/commits", "commit", max_pages)
+
     def list_statuses(self, sha, max_pages=10):
         if not SHA_RE.fullmatch(sha):
             raise ValueError("invalid commit SHA")

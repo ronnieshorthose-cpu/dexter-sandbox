@@ -352,9 +352,10 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(reasons["f1"], REASON_SIZE)
         self.assertLess(len(bundle.text), 1300)
 
-    def test_policy_exclusion_alone_is_not_partial(self):
+    def test_policy_exclusion_alone_is_partial(self):
+        # Audit M-2: an excluded generated file was not reviewed, so the review is incomplete.
         bundle = prepare_diff("diff --git a/a b/a\n+1\ndiff --git a/go.sum b/go.sum\n+2\n", 1000)
-        self.assertFalse(bundle.is_partial)
+        self.assertTrue(bundle.is_partial)
 
 
 if __name__ == "__main__":

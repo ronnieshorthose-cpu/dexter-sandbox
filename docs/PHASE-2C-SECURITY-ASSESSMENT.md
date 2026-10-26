@@ -12,6 +12,15 @@
 > kind of agent that wrote Phase 2B, by reading the code. It has the usual
 > weaknesses of a self-review and is no substitute for an independent audit.
 
+> **Update (2026-10-26):** an independent read-only audit of PR #5 (commit
+> `3b58505`) then found that several fixes below were incomplete. See
+> [Independent audit remediation](#independent-audit-remediation) at the end.
+> In particular, C-1's ledger was per-commit and still trusted the comment, C-4
+> left generated-file names as a way to hide code, C-7 left one failure path
+> stuck, and P-2's legacy-marker rule no longer applies (the comment is no longer
+> used for accounting). Where a section below disagrees with that one, the
+> remediation section is current.
+
 ## How the assessment was done
 
 - Read every file in the reviewer, its tests and workflows, the Phase 2B report, and the PR #4 description.
@@ -277,14 +286,47 @@ the model name the API reported. Both are checked against a strict format before
 
 | ID | Risk | Recommended action (owner decision) |
 |---|---|---|
-| R-1 | **`main` has no branch protection.** Anyone with write access can change the reviewer, and the reviewer runs with the API key. | Protect `main`: require a pull request before merging, and block force pushes. |
-| R-2 | **Insiders with write access can still tamper.** They can edit the bot comment's text, or delete it and push a new commit to reset the count. Any workflow or user with `statuses: write` can also post a fake "Dexter AI review (advisory)" status. | Treat write access as trusted. Require environment approval for every live run. Set the repository's default workflow permissions to read-only. Never make the advisory status a required check. |
+| R-1 | **Updated 2026-10-26: `main` is protected, with gaps.** The original text here ("`main` has no branch protection") was wrong once the owner added the "Protect Dexter Main" ruleset. Checked through GitHub's public rules API: ruleset 25842195 is `active` on the default branch, blocks deletion and force pushes, requires a pull request with review threads resolved, and requires the `Tests / unit-tests` check. It requires **0** approvals, so a writer can merge their own change to the reviewer, and the required check comes from a workflow file a PR can change. Its bypass list needs sign-in to read and was not checked. | Consider requiring 1 approval (from someone other than the author) for changes under `.github/`. Confirm the bypass list. |
+| R-2 | **Insiders and other workflows can still interfere, but no longer lower the count.** Any workflow's `GITHUB_TOKEN`, including one added by a same-repository PR on the `pull_request` event, posts as `github-actions[bot]` and can edit or forge the comment; declaring `permissions:` overrides the repository's read-only default, so that setting does not prevent this. Since the remediation the comment is display only. A forged status can only add to the ledger (blocking reviews) or fake the advisory status. | Require environment approval for every live run. Never make the advisory status a required check. |
 | R-3 | **Software limits are not a billing guarantee.** They depend on owner-entered prices being correct and on GitHub data. Nothing here can stop OpenAI charging. | Use a dedicated OpenAI project with a monthly budget and alerts, and a key restricted to that project. That budget is the real backstop. |
 | R-4 | **There is no repository-wide or daily cap**, only per-run and per-PR limits. Many PRs mean many caps. | Required reviewers on the `ai-review` environment (one approval per live run), plus the OpenAI project budget. |
 | R-5 | **Prompt injection cannot be fully prevented.** A model can still be misled by text in the diff. | Output is advisory, structured, validated and sanitised. It cannot approve or merge. A human must review every PR. |
 | R-6 | **Secret detection is heuristic.** Unusual credential formats may be sent to OpenAI. | Keep secrets out of PRs, use secret scanning, and remember the request uses `store: false`. |
 | R-7 | **GitHub's new `pull_request_target` default policy** may stop automatic reviews in this public repository. | Manual reviews still work. Allowing the event is an owner decision. |
 | R-8 | **The reviewer sees only the diff**, not the rest of the repository. | Human review. |
+
+## Independent audit remediation
+
+**Date:** 2026-10-26. **Audit:** independent read-only review of PR #5 at `3b58505`,
+verdict *FIX BEFORE MERGE*. The findings below are the audit's IDs. Tests are in
+`reviewer_tests/test_audit_remediation.py` unless noted. They were written against
+the fixed code; Python is not installed on the machine that made the changes, so
+they were run only in the **Tests** workflow on GitHub Actions.
+
+| ID | Finding | Fix | Status |
+|---|---|---|---|
+| H-1 | `str.splitlines()` also splits on U+2028, U+2029, `\v`, `\f`, `\x1c`–`\x1e` and `\x85`, which Git does not treat as line ends. A PR could start a fake `diff --git` header inside an added line and credit the rest of a file to an excluded lockfile, giving "completed". The count check only caught *fewer* files. | `diffing.diff_lines` splits on LF only. `check_file_list` compares the diff's files with GitHub's changed-file list (`/pulls/N/files`) and the PR's `changed_files`; a missing, extra, duplicated or unconfirmed file makes the review PARTIAL. | Fixed. `H1FakeFileBoundaryTests`, `H1FileIdentityTests` |
+| H-2 | The ledger covered only the head commit, and the comment counter was trusted. A new commit plus a forged or deleted comment reset the count; a PR's own workflow can post as `github-actions[bot]`. | The comment is never used for spending. The runner reads reservation statuses on every commit in `/pulls/N/commits`, checked against the PR's `commits` count. An incomplete or malformed list, or more than 100 commits, blocks the call. Reservations are never settled downwards, since a "settled" status could be forged. | Fixed, with residual: force-pushing commits out of the PR's list drops their reservations from view. That is no worse than opening a new PR, which always starts a new count (see R-4). `H2PrWideLedgerTests` |
+| M-1 | Read-then-write ledger; only the concurrency group prevented a race, and `pr_number` was trimmed, so `" 7"` could form a different group. | After writing its reservation, the runner re-reads the whole ledger. If its reservation is not visible, or the total is over a limit, it stands down without calling. `pr_number` must be canonical ASCII digits (no trimming, no leading zero, no non-ASCII digits). | Fixed, with residual: the re-check relies on GitHub showing each run's status to the other immediately. Two racing runs may both stand down. `M1ConcurrencyTests` |
+| M-2 | Generated-file patterns (`*.min.js`, `*.map`, lockfile names) hid code without making the review partial. | Every withheld file makes the review PARTIAL, with the reason shown. Lockfile-only PRs are now PARTIAL instead of "nothing to review". | Fixed. `M2GeneratedNameEvasionTests`, updated `C4`, `test_units`, `test_runner` |
+| L-1 | Automatic duplicate protection relied only on the comment. | Automatic runs also stop if the head commit has any reservation in the ledger. | Fixed. `L1DuplicatePaidReviewTests` |
+| L-2 | A failure posting the in-progress comment (or creating the client) after the reservation left a stuck `pending` status. | Guarded: ends FAILED with an error status and no call. | Fixed. `L2StartFailureTests`, updated `C7...test_reservation_comment_failure_means_no_call` |
+| L-3 | A failed final status write still exited 0. | `_status` reports failure; the run exits 1 and says the commit may still show the reservation. | Fixed. Updated `test_runner.FailureTests.test_result_status_write_failure_does_not_crash` |
+| L-4 | The boundary token was not in the trusted instructions. | `instructions_for(boundary)` names the token; boundary lines with other tokens are declared untrusted data. | Fixed. `L4BoundaryTokenTests` |
+| L-5 | `pull-requests: write` was broader than needed. | Jobs now have `contents: read`, `pull-requests: read`, `issues: write`, `statuses: write`. | Fixed in the workflow; **not yet verified on GitHub** that `issues: write` is enough to comment on a PR. The first dry run (README Activation step 5) checks it. "Allow GitHub Actions to create and approve pull requests" needs admin access to read and was not checked. `test_workflows.test_job_permissions_minimal` |
+| L-6 | Forged statuses or more than 1,000 statuses on a commit block reviews. | Not changed: it fails closed (no call). | Documented |
+| L-7 | Tiered (long-context) pricing is not modelled. | Not changed: one input and one output price. | Documented: enter the higher price, or keep `AI_REVIEW_MAX_DIFF_CHARS` low |
+
+Test gaps the audit named that are now covered: the real `OpenAIClient` obeying a
+lowered attempt limit (`RealClientAttemptLimitTests`), forged comments as the bot,
+reset across commits, concurrent reservations, an unconfirmed reservation, and a
+failed final status write. Still not covered by tests: a job killed by its timeout
+in the middle of a call (the reservation stays counted, and the status stays
+`pending`), and the workflow files' runtime behaviour (the workflow tests are
+static text checks).
+
+The **Tests** workflow now also prints the unittest result line and any failing
+test names as annotations, so results can be read without the full log.
 
 ## What did not change
 

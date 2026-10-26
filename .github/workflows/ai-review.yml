@@ -48,7 +48,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read
+      issues: write
       statuses: write
     steps:
       - name: Check out the trusted default-branch copy of the reviewer
@@ -84,10 +85,13 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Comments go through the issues API, so pull-requests stays read-only:
+    # this token cannot submit a pull request review or approval.
     environment: ai-review
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read
+      issues: write
       statuses: write
     steps:
       - name: Check out the trusted default-branch copy of the reviewer

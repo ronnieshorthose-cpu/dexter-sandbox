@@ -130,7 +130,8 @@ class HappyPathTests(unittest.TestCase):
         self.assertEqual(spy.created, 1)
         self.assertEqual(len(gh.bot_bodies()), 1)  # reservation comment was updated, not duplicated
         marker = last_marker(gh)
-        self.assertEqual((marker.sha, marker.state, marker.paid_calls), (HEAD_SHA, "completed", 1))
+        # The comment shows what the ledger counts: the worst case reserved (first try + retry).
+        self.assertEqual((marker.sha, marker.state, marker.paid_calls), (HEAD_SHA, "completed", 2))
         sha, state, desc = gh.statuses[-1]
         self.assertEqual((sha, state), (HEAD_SHA, "success"))
         self.assertIn("Not an approval", desc)
@@ -164,9 +165,10 @@ class DuplicateReviewTests(unittest.TestCase):
     def test_force_rereviews_but_counts_toward_cap(self):
         gh = FakeGitHub()
         gh.add_comment(marker_comment(state="completed", calls=1))
+        gh.reserve(1)
         result, gh, spy = run(gh=gh, event=Event(7, "", True))
         self.assertEqual(result.outcome, "completed")
-        self.assertEqual(last_marker(gh).paid_calls, 2)
+        self.assertEqual(last_marker(gh).paid_calls, 3)  # 1 already reserved + 2 for this run
 
     def test_failed_review_can_be_retried(self):
         gh = FakeGitHub()
@@ -192,8 +194,9 @@ class DuplicateReviewTests(unittest.TestCase):
 
     def test_forged_marker_cannot_reset_spending_counter(self):
         gh = FakeGitHub()
-        gh.add_comment(marker_comment(state="failed", calls=3))  # real bot comment: cap reached
+        gh.reserve(3)  # the ledger: cap reached
         gh.add_comment(marker_comment(state="failed", calls=0), login="someone", user_type="User")
+        gh.add_comment(marker_comment(state="failed", calls=0))  # forged by another workflow, as the bot
         result, _, spy = run(gh=gh)
         self.assertEqual(result.outcome, "blocked-budget")
         self.assertEqual(spy.created, 0)
@@ -202,7 +205,7 @@ class DuplicateReviewTests(unittest.TestCase):
 class SpendingLimitTests(unittest.TestCase):
     def test_per_pr_cap_blocks_before_any_call(self):
         gh = FakeGitHub()
-        gh.add_comment(marker_comment(state="failed", calls=3))
+        gh.reserve(3)
         result, gh, spy = run(gh=gh)
         self.assertEqual(result.outcome, "blocked-budget")
         self.assertEqual(spy.created, 0)
@@ -245,7 +248,9 @@ class SpendingLimitTests(unittest.TestCase):
         self.assertEqual(seen["marker"].state, "in-progress")
         # Both allowed attempts (first try + retry) are reserved up front.
         self.assertEqual(seen["marker"].paid_calls, 2)
-        self.assertEqual(last_marker(gh).paid_calls, 1)  # settled to the attempts actually made
+        # Never settled downwards: a "settled" record could be forged to lower the count.
+        self.assertEqual(last_marker(gh).paid_calls, 2)
+        self.assertIn("1 paid attempt(s) this run (reserved 2)", gh.bot_bodies()[-1])
 
     def test_retries_are_counted(self):
         client = FakeOpenAI(OpenAIError("HTTP 500", True, 500), openai_response())
@@ -314,6 +319,9 @@ class FailureTests(unittest.TestCase):
         result, _, _ = run(gh=gh)
         self.assertEqual(result.outcome, "completed")
         self.assertTrue(any("could not set commit status" in line for line in result.log))
+        # Audit L-3: the commit still shows the pending reservation, so the run must not pass.
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("commit status could not be set", result.message)
 
 
 class PartialDiffTests(unittest.TestCase):
@@ -347,16 +355,18 @@ class PartialDiffTests(unittest.TestCase):
         self.assertNotIn("sk-abcdefghijklmnopqrstuvwxyz123456", sent)
         self.assertIn("possible secret", gh.bot_bodies()[-1])
 
-    def test_policy_exclusions_alone_still_complete(self):
+    def test_policy_exclusions_make_review_partial(self):
+        # Audit M-2: a lockfile change was not reviewed, so the result must not say "completed".
         diff = SIMPLE_DIFF_WITH_LOCK
         result, gh, _ = run(gh=FakeGitHub(diff=diff))
-        self.assertEqual(result.outcome, "completed")
+        self.assertEqual(result.outcome, "partial")
+        self.assertEqual(gh.statuses[-1][1], "failure")
         self.assertIn("package-lock.json", gh.bot_bodies()[-1])
 
     def test_only_excluded_files_means_no_call(self):
         diff = "diff --git a/package-lock.json b/package-lock.json\n+++ b/package-lock.json\n+{}\n"
         result, gh, spy = run(gh=FakeGitHub(diff=diff))
-        self.assertEqual(result.outcome, "nothing-to-review")
+        self.assertEqual(result.outcome, "partial")
         self.assertEqual(spy.created, 0)
 
     def test_only_secret_files_is_partial_not_success(self):
@@ -440,7 +450,7 @@ class OutputSafetyTests(unittest.TestCase):
         _, gh, _ = run(client=FakeOpenAI(openai_response(evil)))
         body = gh.bot_bodies()[-1]
         self.assertEqual(body.count("<!--"), 1)  # only the real marker
-        self.assertEqual(last_marker(gh).paid_calls, 1)
+        self.assertEqual(last_marker(gh).paid_calls, 2)
         self.assertNotIn("\n## ✅ APPROVED", body)
         self.assertNotIn("@owner", body)
         self.assertNotIn("](https://evil", body)
