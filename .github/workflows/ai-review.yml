@@ -1,0 +1,108 @@
+# Dexter advisory AI review.
+#
+# SAFETY: OFF by default. Nothing runs unless the repository variable
+# AI_REVIEW_MODE is set to "dry-run" or "live". Live mode also requires every
+# gate in .github/ai_review/dexter_review/config.py (owner approval phrase,
+# verified model, prices, spending caps, and the OPENAI_API_KEY secret in the
+# protected "ai-review" environment).
+#
+# This workflow never checks out, builds, or runs pull request code. It runs
+# the reviewer from the default branch and reads the PR diff through the API
+# as data. It only comments and sets a commit status; it cannot approve,
+# merge, or deploy.
+name: Dexter AI review (advisory)
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+        type: number
+      force:
+        description: "Re-review even if this commit was already reviewed (still counts toward the spending cap)"
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: dexter-ai-review-pr-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  dry-run:
+    # Free: never calls OpenAI and never receives the API key.
+    if: >-
+      vars.AI_REVIEW_MODE == 'dry-run' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: Check out the trusted default-branch copy of the reviewer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run reviewer (dry run)
+        working-directory: .github/ai_review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AI_REVIEW_MODE: dry-run
+          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+          AI_REVIEW_PRICE_INPUT_USD_PER_MTOK: ${{ vars.AI_REVIEW_PRICE_INPUT_USD_PER_MTOK }}
+          AI_REVIEW_PRICE_OUTPUT_USD_PER_MTOK: ${{ vars.AI_REVIEW_PRICE_OUTPUT_USD_PER_MTOK }}
+          AI_REVIEW_MAX_PAID_CALLS_PER_PR: ${{ vars.AI_REVIEW_MAX_PAID_CALLS_PER_PR }}
+          AI_REVIEW_MAX_COST_PER_RUN_USD: ${{ vars.AI_REVIEW_MAX_COST_PER_RUN_USD }}
+          AI_REVIEW_MAX_OUTPUT_TOKENS: ${{ vars.AI_REVIEW_MAX_OUTPUT_TOKENS }}
+          AI_REVIEW_MAX_DIFF_CHARS: ${{ vars.AI_REVIEW_MAX_DIFF_CHARS }}
+          AI_REVIEW_REASONING_EFFORT: ${{ vars.AI_REVIEW_REASONING_EFFORT }}
+          AI_REVIEW_PAID_CALLS_APPROVED: ${{ vars.AI_REVIEW_PAID_CALLS_APPROVED }}
+        run: python3 -E -s -m dexter_review
+
+  live:
+    # Paid. The "ai-review" environment must exist BEFORE AI_REVIEW_MODE is set
+    # to "live", restricted to the main branch and (recommended) requiring the
+    # owner's approval for each run. GitHub creates a missing environment with
+    # no protection, so do not enable live mode until it is configured.
+    if: >-
+      vars.AI_REVIEW_MODE == 'live' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ai-review
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - name: Check out the trusted default-branch copy of the reviewer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run reviewer (live)
+        working-directory: .github/ai_review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AI_REVIEW_MODE: live
+          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+          AI_REVIEW_PRICE_INPUT_USD_PER_MTOK: ${{ vars.AI_REVIEW_PRICE_INPUT_USD_PER_MTOK }}
+          AI_REVIEW_PRICE_OUTPUT_USD_PER_MTOK: ${{ vars.AI_REVIEW_PRICE_OUTPUT_USD_PER_MTOK }}
+          AI_REVIEW_MAX_PAID_CALLS_PER_PR: ${{ vars.AI_REVIEW_MAX_PAID_CALLS_PER_PR }}
+          AI_REVIEW_MAX_COST_PER_RUN_USD: ${{ vars.AI_REVIEW_MAX_COST_PER_RUN_USD }}
+          AI_REVIEW_MAX_OUTPUT_TOKENS: ${{ vars.AI_REVIEW_MAX_OUTPUT_TOKENS }}
+          AI_REVIEW_MAX_DIFF_CHARS: ${{ vars.AI_REVIEW_MAX_DIFF_CHARS }}
+          AI_REVIEW_REASONING_EFFORT: ${{ vars.AI_REVIEW_REASONING_EFFORT }}
+          AI_REVIEW_PAID_CALLS_APPROVED: ${{ vars.AI_REVIEW_PAID_CALLS_APPROVED }}
+        run: python3 -E -s -m dexter_review
