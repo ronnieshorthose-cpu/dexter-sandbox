@@ -120,10 +120,11 @@ class ReviewerWorkflowTests(unittest.TestCase):
             perms = re.search(r"permissions:\n((?:\s{6}\S.*\n)+)", section).group(1)
             granted = {line.strip() for line in perms.splitlines()}
             with self.subTest(job=job):
-                # L-5: comments use the issues API; pull-requests stays read-only so
-                # the token cannot submit a review or approval.
+                # Phase 2D: GitHub checks pull-requests (not issues) for comments on a
+                # PR, so pull-requests is write and issues is read only. What that
+                # write allows, and what limits it, is covered in test_phase2d.py.
                 self.assertEqual(
-                    granted, {"contents: read", "pull-requests: read", "issues: write", "statuses: write"}
+                    granted, {"contents: read", "pull-requests: write", "issues: read", "statuses: write"}
                 )
 
     def test_concurrency_per_pr_never_cancels_a_paid_call(self):

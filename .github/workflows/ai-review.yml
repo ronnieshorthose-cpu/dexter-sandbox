@@ -8,8 +8,10 @@
 #
 # This workflow never checks out, builds, or runs pull request code. It runs
 # the reviewer from the default branch and reads the PR diff through the API
-# as data. It only comments and sets a commit status; it cannot approve,
-# merge, or deploy.
+# as data. It only comments and sets a commit status. It cannot merge or
+# deploy, and it cannot approve while the repository setting "Allow GitHub
+# Actions to create and approve pull requests" stays off (see the README,
+# "Permissions").
 name: Dexter AI review (advisory)
 
 on:
@@ -46,10 +48,16 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Comments on a pull request go through the issues API, but GitHub checks
+    # the pull-requests permission for them: with issues: write alone the
+    # comment was refused with HTTP 403 (Phase 2D). pull-requests: write also
+    # allows submitting a review; GitHub blocks approvals by this token while
+    # "Allow GitHub Actions to create and approve pull requests" is off, and
+    # merging needs contents: write, which is not granted.
     permissions:
       contents: read
-      pull-requests: read
-      issues: write
+      pull-requests: write
+      issues: read
       statuses: write
     steps:
       - name: Check out the trusted default-branch copy of the reviewer
@@ -85,13 +93,12 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Comments go through the issues API, so pull-requests stays read-only:
-    # this token cannot submit a pull request review or approval.
     environment: ai-review
+    # Same permissions as the dry-run job, for the same reasons.
     permissions:
       contents: read
-      pull-requests: read
-      issues: write
+      pull-requests: write
+      issues: read
       statuses: write
     steps:
       - name: Check out the trusted default-branch copy of the reviewer

@@ -97,9 +97,28 @@ paid call still end in a FAILED comment and status. If the final status cannot
 be set, the run exits with an error, since the commit would still show the
 pending reservation. Error messages never include tokens or response bodies.
 
-**Permissions.** The jobs get `contents: read`, `pull-requests: read`,
-`issues: write` (to comment, through the issues API) and `statuses: write`. The
-token cannot push, merge, or submit a pull request review or approval.
+**Permissions.** The jobs get `contents: read`, `pull-requests: write`,
+`issues: read` and `statuses: write`.
+- *Why `pull-requests: write`:* the comment is posted through the issues API
+  (`POST /issues/N/comments`), but for a pull request GitHub checks the
+  pull-requests permission, not the issues one. Phase 2C used `issues: write`
+  with `pull-requests: read`, and the first dry run (run #3) was refused with
+  HTTP 403. `issues` is now read only, because nothing writes to real issues.
+- *What it also allows:* a token with `pull-requests: write` can, among other
+  things, submit reviews (including approvals), open pull requests, edit a pull
+  request's title, body or base branch, close or reopen it, request reviewers,
+  and add, edit or delete comments on pull requests.
+- *How that is limited:*
+  - GitHub refuses approvals and new pull requests from `GITHUB_TOKEN` while
+    "Allow GitHub Actions to create and approve pull requests" is off. That
+    setting must stay off (Activation step 2).
+  - Merging needs `contents: write`, which no workflow here has. The
+    "Protect Dexter Main" ruleset also requires a pull request and passing checks.
+  - The token is only used by reviewer code from `main`. PR code is never
+    checked out or run, and fork PRs are skipped.
+  - The reviewer only writes PR comments and commit statuses. It never calls a
+    review, merge, reviewer, label or pull request edit endpoint; tests in
+    `reviewer_tests/test_phase2d.py` fail if it starts to.
 
 ## Files
 
@@ -199,7 +218,9 @@ Do these in order. Stop at any unexpected result. Nothing here is done by Dexter
 
 1. **Review and merge this PR** (owner decision). Nothing runs after merging.
 2. **Repository settings** (Settings → Actions → General):
-   - confirm "Allow GitHub Actions to create and approve pull requests" is **off**;
+   - confirm "Allow GitHub Actions to create and approve pull requests" is **off**
+     (the jobs have `pull-requests: write`, and this setting is what stops their
+     token approving a pull request);
    - check whether the `pull_request_target` default policy applies to this repository.
 3. **Create the environment first** (Settings → Environments → New environment → `ai-review`):
    - Deployment branches and tags → **Selected branches and tags** → add `main` only;
@@ -217,8 +238,15 @@ Do these in order. Stop at any unexpected result. Nothing here is done by Dexter
 5. **Dry run (free)**: set `AI_REVIEW_MODE` = `dry-run`. Actions → "Dexter AI review (advisory)"
    → Run workflow → `pr_number` = `3`. Expect one comment on PR #3 saying
    "DRY RUN — no AI review was performed" and a red status "Dry run only". No OpenAI call.
-   This also confirms that `issues: write` is enough to comment on a pull request
-   (not yet verified on GitHub); if the comment step fails, stop and report it.
+   Also check:
+   - the job log's "GITHUB_TOKEN Permissions" group shows `Contents: read`,
+     `Issues: read`, `PullRequests: write` and `Statuses: write`;
+   - PR #3 has no new review or approval and is still open and unmerged.
+
+   The first dry run (run #3, before Phase 2D) failed here with HTTP 403 because
+   the job had `pull-requests: read`. If the comment step fails again, stop,
+   set `AI_REVIEW_MODE` = `disabled`, and report it. If it succeeds, also set
+   `AI_REVIEW_MODE` = `disabled` until you are ready for step 7.
 6. **OpenAI account (owner)**: create a separate project, set a monthly budget
    with alerts, and create a key restricted to that project. On
    https://developers.openai.com/api/docs/pricing confirm the model ID and its
