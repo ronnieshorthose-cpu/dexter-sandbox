@@ -63,6 +63,10 @@ ROLES = {
     },
 }
 
+# Not a role: the actor recorded for actions run at the local command line by
+# someone whose identity Dexter has not checked (no passphrase was given).
+LOCAL_OPERATOR = "local_operator"
+
 AI_ROLES = (CHATGPT, CLAUDE)
 ASSIGNABLE_ROLES = AI_ROLES
 
@@ -180,6 +184,10 @@ class NotFound(DexterError):
 
 class RuleError(DexterError):
     """The workflow rules do not allow this action now."""
+
+
+class IntegrityError(DexterError):
+    """Stored records disagree with the history or with the owner's signatures."""
 
 
 # Control characters (except tab and newline in multi-line text), carriage

@@ -6,21 +6,22 @@ import unittest
 
 from dexter_coordinator import models
 from dexter_coordinator.auth import AuthError
-from dexter_coordinator.coordinator import Coordinator
 from dexter_coordinator.models import (
     AI_ROLES,
     CHATGPT,
     CLAUDE,
     DEXTER,
     HUMAN,
+    LOCAL_OPERATOR,
     STATES,
     TERMINAL_STATES,
     TRANSITIONS,
+    IntegrityError,
     RuleError,
     allowed_actor,
 )
 
-from tests.coordinator_support import PASS, Clock, CoordinatorTestCase
+from tests.coordinator_support import PASS, Clock, CoordinatorTestCase, make_coordinator
 
 HUMAN_ONLY_TARGETS = ("APPROVED", "REJECTED", "COMPLETED", "CANCELLED")
 
@@ -158,8 +159,8 @@ class HumanApprovalBoundaryTests(CoordinatorTestCase):
                 self.c.approve(task, bad)
         self.assertEqual(self.state(task), "AWAITING_APPROVAL")
         failures = [e for e in self.c.history() if e["action"] == "owner_check_failed"]
-        self.assertEqual(len(failures), 5)
-        self.assertTrue(all(e["actor"] == "unknown" for e in failures))
+        self.assertEqual(len(failures), 5)  # the test clock moves an hour per check, so no lockout here
+        self.assertTrue(all(e["actor"] == LOCAL_OPERATOR and not e["signed"] for e in failures))
 
     def test_every_human_decision_needs_the_passphrase(self):
         awaiting = self.advance(self.new_task("A"), "AWAITING_APPROVAL")
@@ -179,7 +180,7 @@ class HumanApprovalBoundaryTests(CoordinatorTestCase):
         self.assertEqual((self.state(awaiting), self.state(ready)), ("AWAITING_APPROVAL", "READY_FOR_HUMAN"))
 
     def test_no_owner_means_no_approvals(self):
-        c = Coordinator(self.dir + "/fresh.db", clock=Clock(), kdf_iterations=1_000)
+        c = make_coordinator(self.dir + "/fresh.db", Clock())
         try:
             project = c.create_project("Fresh")["id"]
             task = c.create_task(project, "T", "D", criteria=["C"], assignee=CLAUDE)["id"]
@@ -230,7 +231,7 @@ class HumanApprovalBoundaryTests(CoordinatorTestCase):
         with self.assertRaisesRegex(RuleError, "no passing tests"):
             self.c.send_to_review(task)
         handoff = self.c.create_handoff(task)
-        self.c.record_response(handoff["id"], "All done, trust me.", structured=False)
+        self.c.record_response(handoff["id"], "All done, trust me.", PASS, structured=False)
         with self.assertRaisesRegex(RuleError, "unstructured"):
             self.c.send_to_review(task)
         self.report_done(task)
@@ -258,7 +259,7 @@ class HumanApprovalBoundaryTests(CoordinatorTestCase):
         conn.execute("UPDATE tasks SET description = 'Also delete every user' WHERE key = ?", (task,))
         conn.commit()
         conn.close()
-        with self.assertRaisesRegex(RuleError, "does not match what the human owner approved"):
+        with self.assertRaisesRegex(IntegrityError, "content changed after the owner approved it"):
             self.c.start(task)
 
     def test_check_finds_states_without_a_human_decision(self):
@@ -268,8 +269,8 @@ class HumanApprovalBoundaryTests(CoordinatorTestCase):
         conn.commit()
         conn.close()
         problems = self.c.verify()
-        self.assertTrue(any("without a recorded human approval" in p for p in problems))
-        self.assertTrue(any("without a recorded human acceptance" in p for p in problems))
+        self.assertTrue(any("without an owner approval in its history" in p for p in problems))
+        self.assertTrue(any("acceptance record does not match" in p for p in problems))
 
     def test_check_finds_edited_history(self):
         self.approved()
@@ -303,7 +304,7 @@ class PauseTests(CoordinatorTestCase):
         self.c.resume_project(self.project, PASS)
         self.assertEqual(self.c.start(waiting)["state"], "IN_PROGRESS")
         pause = [e for e in self.c.history() if e["action"] == "project_paused"][0]
-        self.assertEqual(pause["actor"], HUMAN)
+        self.assertEqual(pause["actor"], LOCAL_OPERATOR)  # anyone may pause; Dexter does not know who did
 
 
 if __name__ == "__main__":

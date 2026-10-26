@@ -8,8 +8,9 @@ Everything happens in a throwaway database that is deleted afterwards.
 
 DEMO ONLY:
   - The owner passphrase is written into this script so the demo can run
-    unattended. A real owner passphrase is only ever typed into an interactive
-    terminal; the command line has no way to take it from a script.
+    unattended, and a low scrypt cost keeps it fast. A real owner passphrase is
+    typed into an interactive terminal and must never be written down where an
+    AI assistant could read it.
   - The ChatGPT and Claude Code replies are pre-written examples. Nothing is
     sent to either assistant, and nothing on GitHub is touched.
   - "Pocket Library" is a fictional sample project.
@@ -22,7 +23,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dexter_coordinator.cli import describe_event  # noqa: E402
+from dexter_coordinator.cli import ACTOR_LABELS, describe_event  # noqa: E402
 from dexter_coordinator.coordinator import Coordinator, utc_now  # noqa: E402
 from dexter_coordinator.models import RuleError, role_title  # noqa: E402
 from dexter_coordinator.report import next_step, progress_report  # noqa: E402
@@ -49,7 +50,7 @@ def run(directory, out=print):
         out(title)
         out("=" * 72)
 
-    c = Coordinator(os.path.join(directory, "demo.db"), kdf_iterations=50_000)
+    c = Coordinator(os.path.join(directory, "demo.db"), kdf_cost=2 ** 12)
     try:
         step("1. The human owner sets up Dexter (DEMO passphrase) and describes the project")
         c.set_owner_passphrase(DEMO_PASSPHRASE)
@@ -81,8 +82,9 @@ def run(directory, out=print):
             arch, outcome="recommend_accept",
             summary="The scope is small and clear. Consider rejecting duplicate ISBNs.",
             findings=[{"severity": "minor", "title": "Duplicate ISBNs are not mentioned", "details": "", "file": ""}],
-        ))
-        out(f"Recorded ChatGPT's reply. {model} is still {c.get_task(model)['state']}: a reply never approves anything.")
+        ), DEMO_PASSPHRASE)
+        out(f"The owner recorded the reply (it claims to be from ChatGPT; Dexter cannot verify that). "
+            f"{model} is still {c.get_task(model)['state']}: a reply never approves anything.")
 
         step("4. The owner approves the first task (SIMULATED approval)")
         c.plan(model)
@@ -102,7 +104,7 @@ def run(directory, out=print):
         build = c.create_handoff(model, references=["pocket_library/ (new package)"])
         out(build["message"])
 
-        step("6. Claude Code's reply is pasted back and recorded as untrusted data")
+        step("6. The owner pastes back Claude Code's reply and records it (passphrase) as untrusted data")
         recorded = c.record_response(build["id"], reply(
             build, outcome="done",
             summary="Added the Book model, a JSON store and the list command on branch demo/book-catalogue. "
@@ -110,7 +112,7 @@ def run(directory, out=print):
             tests=[{"name": "test_add_book", "result": "passed", "details": ""},
                    {"name": "test_list_sorted_by_title", "result": "passed", "details": ""}],
             references=["branch demo/book-catalogue (example)"],
-        ))
+        ), DEMO_PASSPHRASE)
         for flag in recorded["response"]["flags"]:
             out(f"FLAGGED (not acted on): {flag['rule']}")
         out(f"{model} is still {c.get_task(model)['state']}: the claim in the reply changed nothing.")
@@ -124,7 +126,7 @@ def run(directory, out=print):
             review, outcome="recommend_accept",
             summary="The report meets all three acceptance criteria.",
             findings=[{"severity": "info", "title": "Consider a test for an empty catalogue", "details": "", "file": ""}],
-        ))
+        ), DEMO_PASSPHRASE)
         c.mark_ready(model)
         out(f"{model} is {c.get_task(model)['state']}: {next_step(c.get_task(model))}")
 
@@ -137,11 +139,12 @@ def run(directory, out=print):
 
         step("10. Activity history")
         for event in c.history(project_key=project):
-            out(f"#{event['seq']:<3} {event['actor']:<12} {describe_event(event)}")
+            out(f"#{event['seq']:<3} {ACTOR_LABELS[event['actor']]:<29} {describe_event(event)}")
 
-        problems = c.verify()
+        problems = c.verify(passphrase=DEMO_PASSPHRASE)
         out("")
-        out("Database check: " + ("no problems found." if not problems else "; ".join(problems)))
+        out("Database check, including every owner signature: "
+            + ("no problems found." if not problems else "; ".join(problems)))
         return {"model": c.get_task(model), "loans": c.get_task(loans), "problems": problems}
     finally:
         c.close()

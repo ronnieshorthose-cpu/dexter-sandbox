@@ -10,6 +10,7 @@ from dexter_coordinator.coordinator import Coordinator
 from dexter_coordinator.models import CLAUDE
 
 PASS = "owner-pass-for-tests"
+FAST_KDF = 2 ** 10  # scrypt cost for tests only; real databases use auth.DEFAULT_COST
 
 
 class Clock:
@@ -52,12 +53,28 @@ def response_text(handoff, *, fenced=True, prose=True, **overrides):
     return text
 
 
+class Seconds:
+    """Wall-clock seconds that jump an hour per reading, so lockouts never slow tests down.
+    Tests of the lockout itself replace `now_seconds` with a fixed clock."""
+
+    def __init__(self):
+        self.now = 1_000_000.0
+
+    def __call__(self):
+        self.now += 3600
+        return self.now
+
+
+def make_coordinator(path, clock=None):
+    return Coordinator(path, clock=clock or Clock(), kdf_cost=FAST_KDF, now_seconds=Seconds())
+
+
 class CoordinatorTestCase(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="dexter-test-")
         self.path = os.path.join(self.dir, "dexter.db")
         self.clock = Clock()
-        self.c = Coordinator(self.path, clock=self.clock, kdf_iterations=1_000)
+        self.c = make_coordinator(self.path, self.clock)
         self.c.set_owner_passphrase(PASS)
         self.project = self.c.create_project("Pocket Library", "A fictional book-lending tracker.")["id"]
 
@@ -67,7 +84,7 @@ class CoordinatorTestCase(unittest.TestCase):
 
     def reopen(self):
         self.c.close()
-        self.c = Coordinator(self.path, clock=self.clock, kdf_iterations=1_000)
+        self.c = make_coordinator(self.path, self.clock)
         return self.c
 
     def new_task(self, name="Book list", **kwargs):
@@ -109,12 +126,12 @@ class CoordinatorTestCase(unittest.TestCase):
 
     def report_done(self, task, **overrides):
         handoff = self.c.create_handoff(task)
-        self.c.record_response(handoff["id"], response_text(handoff, **overrides))
+        self.c.record_response(handoff["id"], response_text(handoff, **overrides), PASS)
         return handoff
 
     def review(self, task, **overrides):
         handoff = self.c.create_handoff(task)
-        self.c.record_response(handoff["id"], response_text(handoff, **overrides))
+        self.c.record_response(handoff["id"], response_text(handoff, **overrides), PASS)
         return handoff
 
     def state(self, task):

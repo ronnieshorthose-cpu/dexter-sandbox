@@ -13,7 +13,7 @@ from unittest import mock
 from dexter_coordinator import cli
 from dexter_coordinator.coordinator import Coordinator
 
-from tests.coordinator_support import PASS, response_text
+from tests.coordinator_support import FAST_KDF, PASS, response_text
 
 CLI_SOURCE = os.path.join(os.path.dirname(__file__), "..", "dexter_coordinator", "cli.py")
 
@@ -22,7 +22,7 @@ class CliTestCase(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="dexter-cli-")
         self.db = os.path.join(self.dir, "dexter.db")
-        with Coordinator(self.db, kdf_iterations=1_000) as c:  # fast hashing for tests
+        with Coordinator(self.db, kdf_cost=FAST_KDF) as c:  # fast hashing for tests
             c.set_owner_passphrase(PASS)
         self.prompts = []
 
@@ -90,15 +90,18 @@ class EndToEndTests(CliTestCase):
         self.assertIn("SIMULATED", shown)
         self.assertIn("Dexter did not run them", shown)
         history = self.ok("task", "history", task)
-        self.assertIn("HUMAN OWNER", history)
+        self.assertIn("OWNER (passphrase, signed)", history)
         self.assertIn("[SIMULATED human approval]", history)
-        self.assertIn("CLAUDE CODE (AI, untrusted)", history)
-        self.assertIn("CHATGPT (AI, untrusted)", history)
+        self.assertIn("DEXTER (operator unverified)", history)
+        self.assertIn("claims to be from Claude Code", history)
+        self.assertIn("claims to be from ChatGPT", history)
         report = self.ok("report", "PRJ-001")
         self.assertIn("## Completed tasks", report)
         self.assertIn("TASK-0001 Book list: accepted by the human owner", report)
         self.assertIn("No problems found", self.ok("check"))
-        self.assertEqual(len(self.prompts), 2)  # approve and complete, nothing else
+        self.assertIn("every owner signature", self.ok("check", "--owner"))
+        # approve, two replies recorded, complete, and the signature check: nothing else asks
+        self.assertEqual(len(self.prompts), 5)
 
     def test_listing_and_status_commands(self):
         self.setup_task()
@@ -123,7 +126,7 @@ class HumanBoundaryCliTests(CliTestCase):
         with contextlib.redirect_stdout(out), mock.patch("sys.stdin", io.StringIO(PASS + "\n")):
             code = cli.main(["--db", self.db, "task", "approve", task])
         self.assertEqual(code, 1)
-        self.assertIn("needs an interactive terminal", out.getvalue())
+        self.assertIn("typed into an interactive terminal", out.getvalue())
         self.assertIn("AWAITING_APPROVAL", self.ok("task", "show", task))
 
     def test_wrong_passphrase_is_refused(self):

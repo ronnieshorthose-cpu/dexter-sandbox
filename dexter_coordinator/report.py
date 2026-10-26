@@ -151,7 +151,8 @@ def progress_report(coord, project_key, now):
     for t in tested:
         results = [r["result"] for r in t["test_results"]]
         counted = ", ".join(f"{results.count(r)} {r}" for r in ("passed", "failed", "skipped", "not_run") if results.count(r))
-        out.append(f"- {t['id']}: {counted} (reported by {role_title(t['tests_reported_by'])}; Dexter did not run these tests)")
+        out.append(f"- {t['id']}: {counted} (from a reply that claims to come from {role_title(t['tests_claimed_by'])}, "
+                   "recorded by the owner; Dexter did not run these tests)")
     if not tested:
         out.append("No test results have been reported yet.")
 
@@ -177,9 +178,10 @@ def progress_report(coord, project_key, now):
         if r is None:
             continue
         if r["outcome"] in ("blocked", "needs_clarification"):
-            problems.append(f"{role_title(h['to_role'])} replied '{r['outcome']}' to {h['id']} ({h['task']})")
+            problems.append(f"the reply to {h['id']} ({h['task']}, claims to be from {role_title(h['to_role'])}) "
+                            f"says '{r['outcome']}'")
         if r["flags"]:
-            problems.append(f"the reply to {h['id']} from {role_title(h['to_role'])} contains text that looks like "
+            problems.append(f"the reply to {h['id']} (claims to be from {role_title(h['to_role'])}) contains text that looks like "
                             f"instructions or claims ({'; '.join(f['rule'] for f in r['flags'])}). Dexter did not act on it")
     out += [f"- {p}" for p in problems] or ["None recorded."]
 

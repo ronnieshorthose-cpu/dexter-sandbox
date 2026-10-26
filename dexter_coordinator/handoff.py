@@ -31,13 +31,16 @@ HANDOFF_FORMAT = "dexter-handoff/v1"
 RESPONSE_FORMAT = "dexter-response/v1"
 MAX_RESPONSE_CHARS = 200_000
 
+MAX_JSON_DEPTH = 32
+
 NOT_DELIVERED = "NOT_DELIVERED"
 MARKED_SENT = "MARKED_SENT_BY_HUMAN"
 RESPONSE_RECORDED = "RESPONSE_RECORDED"
 DELIVERY_LABELS = {
     NOT_DELIVERED: "Not delivered. Dexter has no delivery mechanism yet; copy the message by hand.",
-    MARKED_SENT: "The human owner says it was copied to the assistant. No delivery mechanism confirmed receipt.",
-    RESPONSE_RECORDED: "A response was pasted back and recorded (as untrusted data).",
+    MARKED_SENT: "The owner confirmed (with the passphrase) copying it to the assistant. "
+                 "No delivery mechanism confirmed receipt.",
+    RESPONSE_RECORDED: "The owner recorded a pasted reply (passphrase confirmed). Its sender is a claim, not verified.",
 }
 
 SAFETY_RULES = (
@@ -151,8 +154,6 @@ def render_message(payload):
 
 # -- Responses -------------------------------------------------------------------
 
-_FENCE = re.compile(r"```[ \t]*(?:json)?[ \t]*\n(.*?)\n[ \t]*```", re.S | re.I)
-
 COMMON_REQUIRED = ("format", "correlation_id", "task_id", "from_role", "outcome", "summary")
 COMMON_OPTIONAL = ("details", "references")
 LIST_FIELD = {IMPLEMENT: "tests", REVIEW: "findings", ARCHITECTURE_REVIEW: "findings"}
@@ -171,8 +172,50 @@ def _reject_constant(name):
     raise ValidationError(f"the response contains {name}, which is not valid JSON")
 
 
+def _check_depth(text):
+    """Refuse deeply nested JSON before parsing it (linear scan, ignores brackets inside strings)."""
+    depth, in_string, escaped = 0, False, False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                raise ValidationError(f"the response is nested more than {MAX_JSON_DEPTH} levels deep")
+        elif ch in "]}":
+            depth -= 1
+
+
 def _loads(text):
-    return json.loads(text, object_pairs_hook=_reject_duplicates, parse_constant=_reject_constant)
+    _check_depth(text)
+    try:
+        return json.loads(text, object_pairs_hook=_reject_duplicates, parse_constant=_reject_constant)
+    except RecursionError:
+        raise ValidationError("the response is nested too deeply") from None
+
+
+def _fenced_blocks(text):
+    """Code blocks fenced with ``` (or ```json), found line by line in linear time."""
+    blocks, inside, info, lines = [], False, "", []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not inside:
+            if stripped.startswith("```"):
+                inside, info, lines = True, stripped[3:].strip().lower(), []
+        elif stripped == "```":
+            if info in ("", "json"):
+                blocks.append("\n".join(lines))
+            inside = False
+        else:
+            lines.append(line)
+    return blocks
 
 
 def _name(key):
@@ -183,7 +226,7 @@ def _name(key):
 def extract_response_object(text):
     """Find the single dexter-response/v1 JSON object in a pasted reply."""
     candidates = []
-    for block in _FENCE.findall(text):
+    for block in _fenced_blocks(text):
         try:
             value = _loads(block)
         except json.JSONDecodeError:

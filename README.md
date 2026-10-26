@@ -13,4 +13,5 @@ python3 examples/coordinator_demo.py      # fictional end-to-end demo
 python3 -m unittest discover -s tests -t . -v
 ```
 
-See [docs/COORDINATOR.md](docs/COORDINATOR.md).
+See [docs/COORDINATOR.md](docs/COORDINATOR.md), and for its security design and limits
+[docs/COORDINATOR-SECURITY.md](docs/COORDINATOR-SECURITY.md).

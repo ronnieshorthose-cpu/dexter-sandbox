@@ -7,6 +7,7 @@ import argparse
 import getpass
 import json
 import os
+import sqlite3
 import sys
 
 from . import __version__
@@ -24,6 +25,7 @@ from .models import (
     DEXTER,
     HUMAN,
     IN_PROGRESS,
+    LOCAL_OPERATOR,
     PRIORITIES,
     REJECTED,
     ROLES,
@@ -38,12 +40,13 @@ from .report import next_step, progress_report, project_summary
 
 DEFAULT_DB = os.path.join("~", ".dexter", "coordinator.db")
 
+# Who made each history entry, and how sure Dexter is about it.
 ACTOR_LABELS = {
-    HUMAN: "HUMAN OWNER",
-    DEXTER: "DEXTER",
-    CHATGPT: "CHATGPT (AI, untrusted)",
-    CLAUDE: "CLAUDE CODE (AI, untrusted)",
-    "unknown": "UNKNOWN",
+    HUMAN: "OWNER (passphrase, signed)",
+    DEXTER: "DEXTER (operator unverified)",
+    LOCAL_OPERATOR: "LOCAL OPERATOR (unverified)",
+    CHATGPT: "CHATGPT (claimed)",
+    CLAUDE: "CLAUDE CODE (claimed)",
 }
 
 
@@ -53,26 +56,42 @@ def say(text=""):
 
 
 def read_passphrase(prompt="Owner passphrase: "):
-    """Ask the human for the owner passphrase. Only works in an interactive terminal.
+    """Ask for the owner passphrase, typed into an interactive terminal.
 
-    There is deliberately no option, environment variable or file that supplies
-    the passphrase, so a script or an AI agent driving this command line cannot
-    make an owner decision.
+    There is no option, environment variable or file for the passphrase, and
+    plain pipes are refused. This stops scripts that simply pipe text in. It is
+    NOT an authentication boundary: a program that opens a pseudo-terminal can
+    type into this prompt. The passphrase itself is the only real check, so it
+    must never be given to an AI assistant or stored where one can read it.
     """
     if not sys.stdin.isatty():
         raise AuthError(
-            "this is a human owner decision and needs an interactive terminal. "
-            "Scripts and AI agents cannot make it"
+            "owner actions need the passphrase typed into an interactive terminal; input from a pipe or "
+            "file is refused"
         )
     return getpass.getpass(prompt)
 
 
-def human_banner(what):
+def human_banner(what, details=()):
     say("")
-    say("HUMAN OWNER DECISION (SIMULATED APPROVAL)")
+    say("OWNER ACTION (SIMULATED APPROVAL)")
     say(f"You are about to {what}.")
+    for line in details:
+        say(f"  {line}")
     say(APPROVAL_LABEL)
-    say("It is recorded in Dexter only. Nothing on GitHub or anywhere else changes.")
+    say("It is recorded and signed in Dexter only. Nothing on GitHub or anywhere else changes.")
+
+
+def task_summary(task):
+    """What an owner approves: the exact content the approval will cover."""
+    lines = [f"Assigned to: {role_title(task['assignee']) if task['assignee'] else '(nobody)'}",
+             f"Priority: {task['priority']}",
+             "Depends on: " + (", ".join(d["id"] for d in task["depends_on"]) or "(none)"),
+             "Description:"]
+    lines += [f"  {line}" for line in task["description"].splitlines()]
+    lines.append("Acceptance criteria:")
+    lines += [f"  {i}. {c}" for i, c in enumerate(task["criteria"], 1)]
+    return lines
 
 
 # -- formatting ------------------------------------------------------------------
@@ -101,11 +120,13 @@ def show_task(task):
     if not task["criteria"]:
         say("    (none yet)")
     if task["test_results"]:
-        say(f"  Test results (reported by {role_title(task['tests_reported_by'])}; Dexter did not run them):")
+        say(f"  Test results (from a reply that claims to be from {role_title(task['tests_claimed_by'])}, "
+            "recorded by the owner; Dexter did not run them):")
         for t in task["test_results"]:
             say(f"    {t['result']:<8} {t['name']}")
-    if task["reviewed_by"]:
-        say(f"  Latest review ({role_title(task['reviewed_by'])}, advisory): {task['review_outcome']}")
+    if task["review_claimed_by"]:
+        say(f"  Latest review (advisory, from a reply that claims to be from {role_title(task['review_claimed_by'])}; "
+            f"the author is not verified): {task['review_outcome']}")
         for f in task["review_findings"]:
             say(f"    [{f['severity']}] {f['title']}" + (f" ({f['file']})" if f["file"] else ""))
     say(f"  Next step:    {next_step(task)}")
@@ -132,7 +153,8 @@ def show_handoff(h, *, full=True):
         say("  Response:       none recorded")
     else:
         kind = "structured" if r["structured"] else "UNSTRUCTURED (cannot be checked; it does not count as evidence)"
-        say(f"  Response:       recorded {r['recorded_at']} from {role_title(r['from_role'])}, {kind}")
+        say(f"  Response:       recorded by the owner {r['recorded_at']}, {kind}")
+        say(f"  Claimed sender: {role_title(r['claimed_from'])} (not verified: anyone can write a reply)")
         if r["structured"]:
             say(f"  Outcome:        {r['outcome']}")
             say(f"  Summary:        {r['data']['summary']}")
@@ -172,18 +194,20 @@ def describe_event(e):
     if action == "handoff_created":
         return f"prepared {d['handoff']} ({d['action']}) for {role_title(d['to'])}; not delivered (manual copy needed)"
     if action == "handoff_marked_sent":
-        return f"owner says {d['handoff']} was copied to the assistant (not confirmed by any delivery mechanism)"
+        return f"confirmed {d['handoff']} was copied to the assistant (not confirmed by any delivery mechanism)"
     if action == "response_recorded":
-        text = f"reply to {d['handoff']} recorded as untrusted data, outcome {d['outcome'] or 'unstructured'}"
+        text = (f"recorded the reply to {d['handoff']} (claims to be from {role_title(d.get('claimed_from'))}), "
+                f"outcome {d['outcome'] or 'unstructured'}")
         if d.get("flags"):
             text += f"; flagged: {', '.join(d['flags'])}"
         return text
     if action == "owner_passphrase_set":
-        return "set the owner passphrase used for SIMULATED approvals"
+        return "set up the owner passphrase (whoever knows it is treated as the owner)"
     if action == "owner_passphrase_changed":
         return "changed the owner passphrase"
     if action == "owner_check_failed":
-        return f"wrong owner passphrase (tried to {d.get('purpose', 'act as the owner')})"
+        wait = f"; owner actions paused for {d['wait_seconds']}s" if d.get("wait_seconds") else ""
+        return f"wrong owner passphrase (tried to {d.get('purpose', 'act as the owner')}){wait}"
     if action == "project_paused":
         return f"paused the project: {d.get('reason', '')}"
     if action == "project_resumed":
@@ -203,7 +227,7 @@ def show_history(events):
     if not events:
         say("No history yet.")
     for e in events:
-        say(f"{e['ts']}  #{e['seq']:<4} {ACTOR_LABELS.get(e['actor'], e['actor']):<27} {describe_event(e)}")
+        say(f"{e['ts']}  #{e['seq']:<4} {ACTOR_LABELS.get(e['actor'], e['actor']):<29} {describe_event(e)}")
 
 
 # -- commands --------------------------------------------------------------------
@@ -212,8 +236,10 @@ def cmd_init(c, args):
     if c.owner_is_set():
         say(f"Dexter is already set up at {c.store.path}.")
         return 0
-    say("Set the owner passphrase. You will type it for every human owner decision")
-    say("(approve, reject, complete, return, cancel, resume). It is stored only as a salted hash.")
+    say("Set the owner passphrase (at least 12 characters). You will type it for every owner action:")
+    say("approve, reject, complete, return, cancel, resume, recording a reply and marking a handoff sent.")
+    say("Whoever knows this passphrase is the owner as far as Dexter can tell. Never give it to an AI")
+    say("assistant, and keep this database where AI tools cannot read it (see docs/COORDINATOR-SECURITY.md).")
     say(APPROVAL_LABEL)
     first = read_passphrase("New owner passphrase: ")
     second = read_passphrase("Type it again: ")
@@ -379,7 +405,8 @@ def _human_step(method, to_state, verb, needs_reason=False):
     def run(c, args):
         task = c.get_task(args.task)
         c.check_human_decision(task["id"], to_state)  # refuse before asking for the passphrase
-        human_banner(f"{verb} {task['id']} \"{task['name']}\"")
+        details = task_summary(task) if to_state == APPROVED else ()
+        human_banner(f"{verb} {task['id']} \"{task['name']}\"", details)
         if needs_reason:
             getattr(c, method)(task["id"], read_passphrase(), args.reason)
         else:
@@ -397,8 +424,9 @@ def cmd_handoff_create(c, args):
     show_handoff(h, full=not args.save)
     say("")
     say(f"Dexter has NOT sent this anywhere. Copy it into {role_title(h['to_role'])} yourself.")
-    say(f"Optional: `handoff mark-sent {h['id']}` once you have pasted it.")
-    say(f"Then save the reply to a file and run `handoff record {h['id']} --file reply.txt`.")
+    say("Read it first: anyone who can run Dexter's command line can add text to a handoff.")
+    say(f"Optional: `handoff mark-sent {h['id']}` once you have pasted it (asks for the owner passphrase).")
+    say(f"Then save the reply to a file and run `handoff record {h['id']} --file reply.txt` (passphrase).")
     return 0
 
 
@@ -429,7 +457,12 @@ def cmd_handoff_list(c, args):
 
 
 def cmd_handoff_mark_sent(c, args):
-    h = c.mark_handoff_sent(args.handoff)
+    h = c.get_handoff(args.handoff)
+    if h["delivery"] != "NOT_DELIVERED":
+        say(f"{h['id']}: {h['delivery_label']}")
+        return 0
+    human_banner(f"confirm that you copied {h['id']} to {role_title(h['to_role'])}")
+    h = c.mark_handoff_sent(h["id"], read_passphrase())
     say(f"{h['id']}: {h['delivery_label']}")
     return 0
 
@@ -437,15 +470,18 @@ def cmd_handoff_mark_sent(c, args):
 def cmd_handoff_record(c, args):
     c.get_handoff(args.handoff)  # report an unknown handoff before reading the file
     text = _read_reply(args.file)
-    h = c.record_response(args.handoff, text, structured=not args.unstructured)
-    r = h["response"]
-    say(f"Recorded the reply to {h['id']} from {role_title(r['from_role'])} as untrusted data.")
-    if r["structured"]:
-        say(f"Outcome: {r['outcome']}. Summary: {r['data']['summary']}")
+    preview = c.preview_response(args.handoff, text, structured=not args.unstructured)
+    details = [f"Handoff: {preview['handoff']} for {preview['task']}",
+               f"Claimed sender: {role_title(preview['claimed_from'])} (Dexter cannot verify who wrote it)"]
+    if preview["structured"]:
+        details += [f"Outcome: {preview['outcome']}", f"Summary: {preview['data']['summary']}"]
     else:
-        say("It was recorded as UNSTRUCTURED text, so Dexter cannot check it and it does not count as evidence.")
-    show_flags(r["flags"])
-    say("Recording a reply never changes a task's state or approval.")
+        details.append("UNSTRUCTURED: Dexter cannot check it, and it will not count as evidence")
+    show_flags(preview["flags"])
+    human_banner("record this reply exactly as pasted. Only confirm if you pasted it from that assistant yourself",
+                 details)
+    h = c.record_response(args.handoff, text, read_passphrase(), structured=not args.unstructured)
+    say(f"Recorded the reply to {h['id']}. Recording a reply never changes a task's state or approval.")
     return _after(c, h["task"], "{id} is {state}.")
 
 
@@ -465,15 +501,27 @@ def cmd_report(c, args):
 
 
 def cmd_check(c, args):
-    problems = c.verify()
+    passphrase = None
+    if args.owner:
+        human_banner("check every owner signature in the database")
+        passphrase = read_passphrase()
+    problems = c.verify(passphrase=passphrase)
+    warnings = c.permission_warnings()
+    for w in warnings:
+        say(f"Warning: {w}")
     if problems:
         say(f"Found {len(problems)} problem(s) in {c.store.path}:")
         for p in problems:
             say(f"  - {p}")
         say("See \"Recovering from errors\" in docs/COORDINATOR.md.")
         return 1
-    say(f"No problems found in {c.store.path}.")
-    return 0
+    seq, digest = c.anchor()
+    checked = "the history, the stored records and every owner signature" if args.owner else \
+        "the history and the stored records (add --owner to also check owner signatures)"
+    say(f"No problems found in {c.store.path}: checked {checked}.")
+    say(f"History anchor: entry {seq}, {digest[:16]}. Note it somewhere outside this computer; if a later check")
+    say("shows an older anchor, the file was replaced with an older copy.")
+    return 1 if warnings else 0
 
 
 def cmd_backup(c, args):
@@ -518,6 +566,8 @@ def build_parser():
         epilog="Start with `init`, then `project create`. Full guide: docs/COORDINATOR.md",
     )
     parser.add_argument("--db", help=f"database file (default: $DEXTER_DB or {DEFAULT_DB})")
+    parser.add_argument("--allow-inside-git-repo", action="store_true",
+                        help="allow a database or backup inside a git working tree (not recommended)")
     parser.add_argument("--version", action="version", version=f"Dexter coordinator {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
@@ -635,9 +685,10 @@ def build_parser():
     p = add(handoff, "list", cmd_handoff_list, "List handoffs.")
     p.add_argument("--task")
     p = add(handoff, "mark-sent", cmd_handoff_mark_sent,
-            "Note that you copied a handoff to the assistant (your statement; not a confirmed delivery).")
+            "Owner: confirm you copied a handoff to the assistant (passphrase; not a confirmed delivery).")
     p.add_argument("handoff")
-    p = add(handoff, "record", cmd_handoff_record, "Record the assistant's reply (untrusted data).")
+    p = add(handoff, "record", cmd_handoff_record,
+            "Owner: record the assistant's reply as untrusted data (passphrase).")
     p.add_argument("handoff")
     p.add_argument("--file", required=True, help="file with the pasted reply, or - to read standard input")
     p.add_argument("--unstructured", action="store_true",
@@ -649,7 +700,8 @@ def build_parser():
     p = add(sub, "report", cmd_report, "Write a plain-English progress report for a project.")
     p.add_argument("project")
     p.add_argument("--save", metavar="FILE", help="write the report to a new file instead of the screen")
-    add(sub, "check", cmd_check, "Check the database for damage or rule violations.")
+    p = add(sub, "check", cmd_check, "Check the database for damage, tampering or rule violations.")
+    p.add_argument("--owner", action="store_true", help="also check every owner signature (passphrase)")
     p = add(sub, "backup", cmd_backup, "Copy the database to a new file.")
     p.add_argument("destination")
     return parser
@@ -666,10 +718,19 @@ def main(argv=None):
         parser.print_help()
         return 0
     try:
-        with Coordinator(db_path(args)) as coordinator:
+        with Coordinator(db_path(args), allow_inside_git=args.allow_inside_git_repo) as coordinator:
             return args.func(coordinator, args)
     except DexterError as exc:
         say(f"Error: {exc}")
+        return 1
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc) or "busy" in str(exc):
+            say("Error: the database is busy (another Dexter command is using it). Nothing was changed; try again.")
+        else:
+            say(f"Error: database problem ({exc}). Nothing was changed. Run `check`.")
+        return 1
+    except sqlite3.Error as exc:
+        say(f"Error: database problem ({exc}). Nothing was changed. Run `check`.")
         return 1
     except KeyboardInterrupt:
         say("\nStopped. Each change is saved completely or not at all, so run `check` if unsure.")
