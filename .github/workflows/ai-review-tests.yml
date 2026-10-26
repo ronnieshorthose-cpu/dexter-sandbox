@@ -1,0 +1,28 @@
+# Runs the automated tests. Unprivileged: read-only token, no secrets, no environment.
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: AI reviewer tests
+        run: python3 -m unittest discover -s .github/ai_review/reviewer_tests -t .github/ai_review -v
+      - name: Application tests (if present)
+        run: |
+          if [ -d tests ]; then
+            python3 -m unittest discover -s tests -t . -v
+          else
+            echo "No application tests on this branch."
+          fi

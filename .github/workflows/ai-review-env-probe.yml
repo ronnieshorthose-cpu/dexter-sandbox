@@ -1,0 +1,45 @@
+# Verifies the "ai-review" environment's branch restriction with a DUMMY secret
+# before any real API key is stored. Off unless the repository variable
+# AI_REVIEW_PROBE is set to "enabled".
+#
+# Use a harmless value such as "canary-not-a-real-key" for AI_REVIEW_CANARY.
+# The job only prints whether the secret is present, never its value.
+#
+# Expected results with deployment branches set to "main" only:
+#   workflow_dispatch from main            -> runs, canary=present
+#   workflow_dispatch from another branch  -> rejected by environment rules
+#   pull_request_target                    -> runs (from main), canary=present
+#   pull_request                           -> rejected (ref is refs/pull/N/merge)
+name: AI review environment probe
+
+on:
+  workflow_dispatch:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  probe:
+    if: vars.AI_REVIEW_PROBE == 'enabled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    environment: ai-review
+    permissions: {}
+    steps:
+      - name: Report whether the canary secret is visible (value is never printed)
+        env:
+          CANARY: ${{ secrets.AI_REVIEW_CANARY }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_REF: ${{ github.ref }}
+        run: |
+          if [ -n "$CANARY" ]; then seen=present; else seen=absent; fi
+          echo "event=$EVENT_NAME ref=$RUN_REF canary=$seen"
+          {
+            echo "### AI review environment probe"
+            echo "| event | ref | canary secret |"
+            echo "|---|---|---|"
+            echo "| $EVENT_NAME | $RUN_REF | $seen |"
+          } >> "$GITHUB_STEP_SUMMARY"
