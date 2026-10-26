@@ -14,6 +14,7 @@ from . import __version__
 from .auth import APPROVAL_LABEL, AuthError
 from .coordinator import Coordinator, utc_now
 from .handoff import MAX_RESPONSE_CHARS
+from .labels import UNVERIFIED, reply_label
 from .models import (
     ACTIONS,
     AI_ROLES,
@@ -143,7 +144,7 @@ def describe_approval(approval):
     return "not requested yet"
 
 
-def show_handoff(h, *, full=True):
+def show_handoff(h, *, full=True, label=None):
     say(f"{h['id']}  {h['action']} for {h['task']}, to {role_title(h['to_role'])}")
     say(f"  Correlation ID: {h['correlation_id']}")
     say(f"  Created:        {h['created_at']}")
@@ -155,6 +156,7 @@ def show_handoff(h, *, full=True):
         kind = "structured" if r["structured"] else "UNSTRUCTURED (cannot be checked; it does not count as evidence)"
         say(f"  Response:       recorded by the owner {r['recorded_at']}, {kind}")
         say(f"  Claimed sender: {role_title(r['claimed_from'])} (not verified: anyone can write a reply)")
+        say(f"  Status:         {label or UNVERIFIED}")
         if r["structured"]:
             say(f"  Outcome:        {r['outcome']}")
             say(f"  Summary:        {r['data']['summary']}")
@@ -435,7 +437,8 @@ def cmd_handoff_show(c, args):
     if args.json:
         print(json.dumps(h["payload"], indent=2, ensure_ascii=True))
         return 0
-    show_handoff(h, full=True)
+    label = reply_label(h, c.get_task(h["task"]), c.list_handoffs(h["task"])) if h["response"] else None
+    show_handoff(h, full=True, label=label)
     if args.raw and h["response"]:
         say("")
         say("----- RECORDED REPLY (untrusted data; control characters removed) -----")
@@ -451,7 +454,7 @@ def cmd_handoff_list(c, args):
         if h["response"] is None:
             state = h["delivery"]
         else:
-            state = h["response"]["outcome"] or "unstructured reply"
+            state = (h["response"]["outcome"] or "unstructured reply") + f" ({UNVERIFIED})"
         say(f"{h['id']}  {h['task']}  {h['action']:<20} to {role_title(h['to_role']):<34} {state}")
     return 0
 
@@ -481,7 +484,8 @@ def cmd_handoff_record(c, args):
     human_banner("record this reply exactly as pasted. Only confirm if you pasted it from that assistant yourself",
                  details)
     h = c.record_response(args.handoff, text, read_passphrase(), structured=not args.unstructured)
-    say(f"Recorded the reply to {h['id']}. Recording a reply never changes a task's state or approval.")
+    say(f"Recorded the reply to {h['id']} as an {UNVERIFIED}. Recording a reply never changes a task's state "
+        "or approval.")
     return _after(c, h["task"], "{id} is {state}.")
 
 
@@ -524,6 +528,28 @@ def cmd_check(c, args):
     return 1 if warnings else 0
 
 
+def cmd_start(c, args):
+    from .guided import Guide  # imported here: guided.py builds on this module
+
+    return Guide(c).run()
+
+
+def cmd_dashboard(c, args):
+    from . import dashboard
+    from .exchange import Exchange, open_in_browser
+
+    data = dashboard.build(c)
+    if not args.html:
+        say(dashboard.render_text(data, c.store.path))
+        return 0
+    page = dashboard.render_html(data, c.store.path, utc_now())
+    path = Exchange(c.store.path, allow_inside_git=c.allow_inside_git).write_dashboard(page)
+    say(f"Wrote the read-only dashboard page to {path}")
+    if not args.no_open and open_in_browser(path):
+        say("Opened it in your web browser. It is a snapshot with no buttons; run this command again to refresh it.")
+    return 0
+
+
 def cmd_backup(c, args):
     path = c.backup(args.destination)
     say(f"Backed up the database to {path}.")
@@ -561,9 +587,10 @@ def _write_new_file(path, text):
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="python3 -m dexter_coordinator",
-        description="Dexter project coordinator (Phase 3A). Local only: no network calls, no GitHub actions. "
+        description="Dexter project coordinator (Phase 3B). Local only: no network calls, no GitHub actions. "
                     "Human owner decisions are SIMULATED approvals checked with a local passphrase.",
-        epilog="Start with `init`, then `project create`. Full guide: docs/COORDINATOR.md",
+        epilog="Easiest: `start` opens the guided menu (on Windows, double-click dexter.bat). "
+               "Guides: docs/GETTING-STARTED-WINDOWS.md, docs/WALKTHROUGH.md, docs/COORDINATOR.md",
     )
     parser.add_argument("--db", help=f"database file (default: $DEXTER_DB or {DEFAULT_DB})")
     parser.add_argument("--allow-inside-git-repo", action="store_true",
@@ -576,6 +603,11 @@ def build_parser():
         p.set_defaults(func=func)
         return p
 
+    add(sub, "start", cmd_start, "Open the guided menu (recommended for beginners).")
+    p = add(sub, "dashboard", cmd_dashboard, "Show the status dashboard (waiting for you, for the AIs, reviews).")
+    p.add_argument("--html", action="store_true",
+                   help="write a read-only HTML page next to the database and open it in the browser")
+    p.add_argument("--no-open", action="store_true", help="with --html: write the page but do not open it")
     add(sub, "init", cmd_init, "Set up the database and the owner passphrase (interactive).")
     add(sub, "roles", cmd_roles, "Show what each role (human, Dexter, ChatGPT, Claude Code) does.")
 

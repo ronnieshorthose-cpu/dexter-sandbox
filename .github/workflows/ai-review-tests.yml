@@ -35,3 +35,22 @@ jobs:
           else
             echo "No application tests on this branch."
           fi
+
+  windows-tests:
+    # Checks that Dexter's coordinator and its Windows launcher work on Windows.
+    # Same read-only token as above; no secrets, no environment.
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Python version
+        run: python --version
+      - name: Application tests on Windows
+        run: python -m unittest discover -s tests -t . -v
+      - name: Windows launcher smoke test
+        shell: cmd
+        env:
+          DEXTER_NO_PAUSE: "1"
+        run: dexter.bat --version

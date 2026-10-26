@@ -13,7 +13,9 @@ key. The audit that led to this design, and how each finding was fixed, is in
 | Owner passphrase | Only in the owner's head | It is the one thing that proves an owner action |
 | Passphrase verifier and wrapped signing key | `owner` table in the database file | With the file, an attacker can try passphrases offline; with the passphrase too, they can sign anything |
 | Approval records and history | `tasks`, `events`, `responses`, `handoffs` tables | They decide what work may start and what the owner is shown |
-| Handoff messages | Database, then the owner's clipboard | They are what the assistants are asked to do |
+| Handoff messages | Database, `~/.dexter/exchange/outbox/` (Phase 3B), then the owner's clipboard |
+| Pasted replies | `~/.dexter/exchange/inbox/` until recorded, then the database | They are untrusted text; a changed file before recording changes what the owner is shown |
+| Dashboard page, saved reports, menu backups | `~/.dexter/exchange/`, `~/.dexter/backups/` | Status information; backups hold the whole database | They are what the assistants are asked to do |
 
 ## Trust zones
 
@@ -58,7 +60,13 @@ Dexter database, its backups, or the owner's terminal.
 | Database structure checked on every open; extra tables, triggers or views refused; `trusted_schema` off | `store.Store` |
 | New databases and backups created owner-only (mode 600), never through symbolic links, never over existing files, never inside a git working tree; `.gitignore` covers `*.db` | `store.py`, `.gitignore` |
 | `check` warns when the database is readable by other users or owned by another account | `store.permission_warnings` |
-| No network, process, git or GitHub code in the package | `tests/test_coordinator_compat.py` |
+| No network, process, git or GitHub code in the package | `tests/test_coordinator_compat.py`, `tests/test_guided_safety.py` |
+| Phase 3B guided menu: every step calls the same Coordinator method as the command line; it adds no rule and no owner shortcut | `guided.py`, `tests/test_guided_safety.py` |
+| The menu asks for the passphrase once per owner action through the same interactive-terminal prompt, never stores it, and treats an empty passphrase as "cancel" (not a wrong attempt) | `guided.Guide.owner_passphrase` |
+| Every AI reply is shown as an UNVERIFIED AI RESPONSE; no label ever calls AI output verified | `labels.py` |
+| Handoff, reply, report, dashboard and backup files live in private folders next to the database (mode 700/600 on POSIX), never inside a git working tree, never through symbolic links, never over existing files | `exchange.py` |
+| The HTML dashboard is a static file: no server, scripts, forms or buttons, everything HTML-escaped, and a Content-Security-Policy that blocks loading anything | `dashboard.render_html` |
+| The dashboard and menu read only public views; they never read the owner record | `dashboard.py`, `guided.py` |
 
 ### Needs separate operating-system accounts (setup, not code)
 
@@ -88,6 +96,20 @@ code cannot enforce them on a computer where everything runs as one user.
 | Merges only after the owner's approval | Branch protection on `main` requiring an approving review from the owner (or a code owner) and passing checks. Today the "Protect Dexter Main" ruleset requires 0 approvals. |
 | Test results Dexter can trust | Read CI results for the pull request from GitHub instead of the assistant's report. |
 | Signed commits | Require signed commits so work can be attributed to an account. |
+
+## Phase 3B notes
+
+- **Everything stays manual.** The guided menu adds convenience, not reach: no
+  network code, no automatic delivery, no GitHub access.
+- **Exchange files are only as private as the owner's account.** Handoff text
+  and pasted replies are not secret, but a program running as the owner could
+  edit a reply file between pasting and recording. Dexter shows the parsed reply
+  before the owner confirms; read it.
+- **Clipboard.** Windows may keep clipboard history (Win+V), so handoff text can
+  stay there. It contains no secrets. Never copy the passphrase.
+- **Windows file permissions.** `check` reports POSIX permission problems only.
+  On Windows, Dexter relies on the user folder being private, which is the
+  Windows default.
 
 ## Limits of local-file security
 

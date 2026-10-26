@@ -1,0 +1,3 @@
+# dexter.bat is stored byte for byte with Windows (CRLF) line endings, so a clone or a
+# "Download ZIP" from GitHub both give Windows a launcher it can run reliably.
+*.bat -text

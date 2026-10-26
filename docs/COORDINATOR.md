@@ -1,4 +1,10 @@
-# Dexter project coordinator (Phase 3A)
+# Dexter project coordinator (Phase 3A engine, Phase 3B guided menu)
+
+> **New to Dexter?** Use the guided menu instead of the commands below: on
+> Windows double-click `dexter.bat`, elsewhere run `python3 -m dexter_coordinator start`.
+> Start with [GETTING-STARTED-WINDOWS.md](GETTING-STARTED-WINDOWS.md) and
+> [WALKTHROUGH.md](WALKTHROUGH.md). This page is the full command reference;
+> the menu uses exactly the same rules.
 
 Dexter keeps track of software development work shared between the human
 owner, ChatGPT and Claude Code. It stores projects and tasks, enforces who may
@@ -366,6 +372,20 @@ Reports say where each fact comes from. Test results are what a reply
 
 ## Working and planned features
 
+**Added in Phase 3B:**
+- **Guided menu** (`start`, or `dexter.bat` on Windows): a home screen showing
+  what is waiting for the owner, for each AI, reviews, active and blocked tasks,
+  and step-by-step options for each task, the recommended one first.
+- **Handoff exchange:** handoffs saved to a private outbox, copied to the
+  clipboard (Windows and macOS) or opened in Notepad; replies pasted into a
+  Notepad file or the window. All of it stays next to the database, outside the
+  repository.
+- **Labels:** every AI reply is shown as an **UNVERIFIED AI RESPONSE**, and owner
+  steps keep the SIMULATED approval banner.
+- **Read-only dashboard** (`dashboard`, or `dashboard --html` for a static page
+  in the browser, with no server, no scripts and no buttons).
+- **Windows support:** the launcher and a `windows-latest` test job.
+
 **Working now (Phase 3A):**
 - **Storage:** a local SQLite file holding projects, tasks, priorities,
   dependencies, acceptance criteria, assignments, approvals, test results,
@@ -378,7 +398,7 @@ Reports say where each fact comes from. Test results are what a reply
   lockout, signatures), entered at the terminal, including recording replies.
 - **Handoffs:** manual handoffs in `dexter-handoff/v1`, with strict
   `dexter-response/v1` reply checking and flagging of untrusted instructions.
-- **Tools:** a command-line interface, progress reports, history, `check`
+- **Tools:** a command-line interface (`start` and `dashboard` added in Phase 3B), progress reports, history, `check`
   (including `--owner`) and `backup`.
 - **Tests:** automated tests in `tests/`, run by the existing **Tests** workflow.
 
