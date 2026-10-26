@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# Local task data created when running the tracker
+tasks.json
