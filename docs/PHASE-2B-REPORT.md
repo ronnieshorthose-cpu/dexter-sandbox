@@ -3,7 +3,7 @@
 **Date:** 2026-10-26
 **Repository:** ronnieshorthose-cpu/dexter-sandbox
 **Branch:** dexter/phase-2b-ai-reviewer
-**Pull request:** PR_LINK_PLACEHOLDER
+**Pull request:** https://github.com/ronnieshorthose-cpu/dexter-sandbox/pull/4
 
 ## Assignment
 
